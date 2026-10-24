@@ -22,6 +22,12 @@ export function isTextBlock(value: unknown): value is TextBlock {
   );
 }
 
+export function isToolResultBlock(value: unknown): boolean {
+  return (
+    !!value && typeof value === "object" && (value as { type?: unknown }).type === "tool_result"
+  );
+}
+
 export function extractTextContent(content: ChatMessageLike["content"]): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
@@ -63,16 +69,33 @@ export function replaceTextContent(msg: ChatMessageLike, newText: string): ChatM
     return { ...msg, content: newText };
   }
 
+  // The first text block receives `newText`. Trailing text blocks are normally
+  // already subsumed by `newText` (callers build it from the JOIN of all text
+  // blocks via extractTextContent), so we drop them to avoid duplicating content.
+  // But if a caller's `newText` does NOT contain a trailing block's text, dropping
+  // it would silently lose content the model can no longer see (B-AGG-TEXTDROP) —
+  // so in that case we keep the trailing block instead of returning [].
   let replaced = false;
   const content = msg.content.flatMap((part) => {
     if (!isTextBlock(part)) return [part];
-    if (replaced) return [];
-    replaced = true;
-    return [{ ...part, text: newText }];
+    if (!replaced) {
+      replaced = true;
+      return [{ ...part, text: newText }];
+    }
+    const partText = part.text ?? "";
+    if (partText && !newText.includes(partText)) return [part];
+    return [];
   });
 
   if (!replaced) {
-    return { ...msg, content: [{ type: "text", text: newText }, ...msg.content] };
+    // Anthropic requires every `tool_result` block to sit at the start of the
+    // user turn that answers a `tool_use`; a text block in front of them makes
+    // upstream reject the whole request with "tool_use ids were found without
+    // tool_result blocks immediately after" (#12890). Append the annotation in
+    // that case, and keep prepending everywhere else.
+    return msg.content.some(isToolResultBlock)
+      ? { ...msg, content: [...msg.content, { type: "text", text: newText }] }
+      : { ...msg, content: [{ type: "text", text: newText }, ...msg.content] };
   }
 
   return { ...msg, content };

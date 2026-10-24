@@ -1,8 +1,9 @@
-import { applyLiteCompression } from "../lite.ts";
+import { applyLiteCompression, isUsableLiteMaxToolLength } from "../lite.ts";
 import { cavemanCompress } from "../caveman.ts";
 import { compressAggressive } from "../aggressive.ts";
-import { ultraCompress } from "../ultra.ts";
+import { ultraCompressHeuristic } from "../ultra.ts";
 import { createCompressionStats } from "../stats.ts";
+import { adaptBodyForCompression } from "../bodyAdapter.ts";
 import {
   DEFAULT_AGGRESSIVE_CONFIG,
   DEFAULT_ULTRA_CONFIG,
@@ -59,12 +60,6 @@ const AGGRESSIVE_SCHEMA: EngineConfigField[] = [
     min: 0,
     max: 1,
   },
-  {
-    key: "preserveSystemPrompt",
-    type: "boolean",
-    label: "Preserve system prompt",
-    defaultValue: true,
-  },
 ];
 
 const ULTRA_SCHEMA: EngineConfigField[] = [
@@ -110,17 +105,7 @@ const ULTRA_SCHEMA: EngineConfigField[] = [
     min: 0,
     max: 32768,
   },
-  {
-    key: "preserveSystemPrompt",
-    type: "boolean",
-    label: "Preserve system prompt",
-    defaultValue: true,
-  },
 ];
-
-function ok(): EngineValidationResult {
-  return { valid: true, errors: [] };
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -210,6 +195,42 @@ function validateUltraConfig(config: Record<string, unknown>): EngineValidationR
   return { valid: errors.length === 0, errors };
 }
 
+// Lite exposes only the tool-truncation controls. System-prompt preservation is a
+// global settings-level flag (not tunable per engine), so it must not appear here.
+const LITE_SCHEMA: EngineConfigField[] = [
+  {
+    key: "compressToolResults",
+    type: "boolean",
+    label: "Proactively truncate long tool results",
+    description:
+      "Truncates long tool results during Lite compression. The Maximum tool-result length field (or OMNIROUTE_LITE_MAX_TOOL_LENGTH when that field is unset) sets the cap. Emergency overflow protection may still trim content when the context exceeds the model budget.",
+    defaultValue: true,
+  },
+  {
+    key: "maxToolLength",
+    type: "number",
+    label: "Maximum tool-result length",
+    description:
+      "Character cap for proactive tool-result truncation. Default 2000. Override with OMNIROUTE_LITE_MAX_TOOL_LENGTH when this field is unset.",
+    defaultValue: 2000,
+    min: 256,
+    max: 1_000_000,
+  },
+];
+
+function validateLiteConfig(config: Record<string, unknown>): EngineValidationResult {
+  const errors: string[] = [];
+  if (
+    config.preserveSystemPrompt !== undefined &&
+    typeof config.preserveSystemPrompt !== "boolean"
+  ) {
+    errors.push("preserveSystemPrompt must be a boolean");
+  }
+  validateBoolean(config, "compressToolResults", errors);
+  validateNumberRange(config, "maxToolLength", 256, 1_000_000, errors);
+  return { valid: errors.length === 0, errors };
+}
+
 export const liteEngine: CompressionEngine = {
   id: "lite",
   name: "Lite",
@@ -228,19 +249,40 @@ export const liteEngine: CompressionEngine = {
     stable: true,
   },
   apply(body, options) {
-    return applyLiteCompression(body, {
+    const adapter = adaptBodyForCompression(body);
+    // stepConfig is Record<string, unknown>, so its compressToolResults is `unknown`.
+    // Only an explicit boolean counts as a step override — anything else falls through
+    // to global config.lite, then the default (keeps the type `boolean`, and a malformed
+    // step value can no longer leak through the `??` chain as `{}`).
+    const stepCompressToolResults = options?.stepConfig?.compressToolResults;
+    const stepMaxToolLength = options?.stepConfig?.maxToolLength;
+    const configMaxToolLength = options?.config?.lite?.maxToolLength;
+    const result = applyLiteCompression(adapter.body, {
       ...options,
       preserveSystemPrompt: options?.config?.preserveSystemPrompt !== false,
+      // buildStepOptions() already merges global config.lite with explicit step.config
+      // (step wins) into stepConfig, so consume that single effective value instead of
+      // AND-ing root and step values — an explicit step `true` must override a global `false`.
+      compressToolResults:
+        typeof stepCompressToolResults === "boolean"
+          ? stepCompressToolResults
+          : (options?.config?.lite?.compressToolResults ?? true),
+      maxToolLength: isUsableLiteMaxToolLength(stepMaxToolLength)
+        ? Math.floor(stepMaxToolLength)
+        : isUsableLiteMaxToolLength(configMaxToolLength)
+          ? Math.floor(configMaxToolLength)
+          : undefined,
     });
+    return adapter.adapted ? { ...result, body: adapter.restore(result.body) } : result;
   },
   compress(body, config) {
     return this.apply(body, { stepConfig: config });
   },
   getConfigSchema() {
-    return AGGRESSIVE_SCHEMA;
+    return LITE_SCHEMA;
   },
   validateConfig(config) {
-    return validateAggressiveConfig(config);
+    return validateLiteConfig(config);
   },
 };
 
@@ -262,9 +304,23 @@ export const cavemanEngine: CompressionEngine = {
     stable: true,
   },
   apply(body, options) {
+    const adapter = adaptBodyForCompression(body);
+    // Mirror rtkAdapter's default-enabled behavior (see rtk/index.ts:530-535). When this engine
+    // is invoked as a stacked step without explicit `enabled` on either the cavemanConfig or the
+    // stepConfig, default `enabled: true` so the rules actually run. Without this,
+    // DEFAULT_CAVEMAN_CONFIG.enabled=false made cavemanCompress() a silent no-op, and the
+    // preview route's default [rtk, caveman] pipeline reported 0% savings even on trigger prose.
+    // (Issue #6425.)
+    const explicitCavemanConfig = options?.config?.cavemanConfig;
+    const explicitStepConfig = options?.stepConfig;
+    const explicitEnabled =
+      (explicitCavemanConfig && "enabled" in explicitCavemanConfig) ||
+      (explicitStepConfig && "enabled" in explicitStepConfig);
+    const enabledDefault = explicitEnabled ? {} : { enabled: true };
     const cavemanConfig = {
-      ...(options?.config?.cavemanConfig ?? {}),
-      ...(options?.stepConfig ?? {}),
+      ...enabledDefault,
+      ...(explicitCavemanConfig ?? {}),
+      ...(explicitStepConfig ?? {}),
       ...(options?.config?.languageConfig?.enabled
         ? {
             language: options.config.languageConfig.defaultLanguage,
@@ -280,7 +336,11 @@ export const cavemanEngine: CompressionEngine = {
           }
         : {}),
     };
-    return cavemanCompress(body as Parameters<typeof cavemanCompress>[0], cavemanConfig);
+    const result = cavemanCompress(
+      adapter.body as Parameters<typeof cavemanCompress>[0],
+      cavemanConfig
+    );
+    return adapter.adapted ? { ...result, body: adapter.restore(result.body) } : result;
   },
   compress(body, config) {
     return this.apply(body, { stepConfig: config });
@@ -311,7 +371,8 @@ export const aggressiveEngine: CompressionEngine = {
     stable: true,
   },
   apply(body, options) {
-    const messages = (body.messages ?? []) as Array<{
+    const adapter = adaptBodyForCompression(body);
+    const messages = (adapter.body.messages ?? []) as Array<{
       role: string;
       content?: string | Array<{ type: string; text?: string }>;
       [key: string]: unknown;
@@ -325,12 +386,12 @@ export const aggressiveEngine: CompressionEngine = {
       preserveSystemPrompt: options?.config?.preserveSystemPrompt !== false,
     };
     const result = compressAggressive(messages, aggressiveConfig);
-    const compressedBody = { ...body, messages: result.messages };
+    const compressedBody = { ...adapter.body, messages: result.messages };
     return {
-      body: compressedBody,
+      body: adapter.restore(compressedBody),
       compressed: result.stats.savingsPercent > 0,
       stats: createCompressionStats(
-        body,
+        adapter.body,
         compressedBody,
         "aggressive",
         ["aggressive"],
@@ -368,7 +429,8 @@ export const ultraEngine: CompressionEngine = {
     stable: true,
   },
   apply(body, options) {
-    const messages = (body.messages ?? []) as Array<{
+    const adapter = adaptBodyForCompression(body);
+    const messages = (adapter.body.messages ?? []) as Array<{
       role: string;
       content?: string | unknown[];
       [key: string]: unknown;
@@ -381,13 +443,13 @@ export const ultraEngine: CompressionEngine = {
       ...(options?.stepConfig ?? {}),
       preserveSystemPrompt: options?.config?.preserveSystemPrompt !== false,
     };
-    const result = ultraCompress(messages, ultraConfig);
-    const compressedBody = { ...body, messages: result.messages };
+    const result = ultraCompressHeuristic(messages, ultraConfig);
+    const compressedBody = { ...adapter.body, messages: result.messages };
     return {
-      body: compressedBody,
+      body: adapter.restore(compressedBody),
       compressed: result.stats.savingsPercent > 0,
       stats: createCompressionStats(
-        body,
+        adapter.body,
         compressedBody,
         "ultra",
         ["ultra"],

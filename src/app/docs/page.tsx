@@ -1,107 +1,151 @@
 import Link from "next/link";
 import { Metadata } from "next";
-import { docsNavigation } from "./lib/docsNavigation";
-import { WhatsNewSection } from "./components/WhatsNewSection";
+import { source } from "@/lib/source";
+import { getTranslations } from "next-intl/server";
 
-export const metadata: Metadata = {
-  title: "OmniRoute Documentation",
-  description:
-    "Everything you need to route, compress, and scale your AI — setup guides, API reference, compression, deployment, and more.",
-  openGraph: {
-    title: "OmniRoute Documentation",
-    description:
-      "Comprehensive docs for OmniRoute AI gateway — setup, API, compression, deployment, and more.",
-    type: "website",
-    url: "https://omniroute.online/docs",
-  },
-  twitter: {
-    card: "summary_large_image",
-    title: "OmniRoute Documentation",
-    description: "Comprehensive docs for OmniRoute AI gateway",
-  },
-};
+export async function generateMetadata(): Promise<Metadata> {
+  const t = await getTranslations("docs");
+  return {
+    title: t("homeTitle"),
+    description: t("homeMetadataDescription"),
+    openGraph: {
+      title: t("homeTitle"),
+      description: t("homeMetadataDescription"),
+      type: "website",
+      url: "https://omniroute.online/docs",
+    },
+    twitter: {
+      card: "summary_large_image",
+      title: t("homeTitle"),
+      description: t("homeTwitterDescription"),
+    },
+  };
+}
 
 const featuredLinks = [
   {
-    slug: "setup-guide",
-    title: "Setup Guide",
+    href: "/docs/getting-started/QUICK-START",
+    titleKey: "featuredQuickStartTitle",
     icon: "rocket_launch",
-    desc: "Get OmniRoute running in 3 minutes",
+    descriptionKey: "featuredQuickStartDescription",
   },
   {
-    slug: "api-reference",
-    title: "API Reference",
-    icon: "code",
-    desc: "All endpoints with examples",
+    href: "/docs/getting-started/AUTO-COMBO-GUIDE",
+    titleKey: "featuredAutoComboTitle",
+    icon: "auto_awesome",
+    descriptionKey: "featuredAutoComboDescription",
   },
   {
-    slug: "compression-guide",
-    title: "Compression Guide",
-    icon: "compress",
-    desc: "Save 15-95% eligible tokens automatically",
+    href: "/docs/getting-started/PROVIDERS-GUIDE",
+    titleKey: "featuredProvidersTitle",
+    icon: "link",
+    descriptionKey: "featuredProvidersDescription",
   },
 ];
 
-export default function DocsHomePage() {
+const sections = [
+  {
+    titleKey: "nonTechUsersTitle",
+    subtitleKey: "nonTechUsersSubtitle",
+    icon: "rocket_launch",
+    color: "green",
+    folders: ["getting-started", "guides"],
+  },
+  {
+    titleKey: "techUsersTitle",
+    subtitleKey: "techUsersSubtitle",
+    icon: "code",
+    color: "blue",
+    folders: [
+      "architecture",
+      "reference",
+      "frameworks",
+      "routing",
+      "security",
+      "compression",
+      "ops",
+      "providers",
+      "comparison",
+    ],
+  },
+];
+
+export default async function DocsHomePage() {
+  const t = await getTranslations("docs");
+  const pages = source.getPages();
+
   return (
-    <div className="max-w-4xl mx-auto">
-      <div className="text-center mb-12">
-        <h1 className="text-4xl font-bold text-text-main mb-4">OmniRoute Documentation</h1>
-        <p className="text-lg text-text-muted mb-6">
-          Everything you need to route, compress, and scale your AI
-        </p>
-        <p className="text-sm text-text-muted">
-          Press{" "}
-          <kbd className="px-1.5 py-0.5 bg-bg-subtle border border-border rounded font-mono text-xs">
-            ⌘K
-          </kbd>{" "}
-          to search the docs
+    <div className="max-w-4xl mx-auto py-8 px-4">
+      <div className="text-center mb-16 mt-8">
+        <h1 className="text-4xl font-bold text-fd-foreground mb-5">{t("homeTitle")}</h1>
+        <p className="text-lg text-fd-muted-foreground mb-6">{t("homeDescription")}</p>
+        <p className="text-sm text-fd-muted-foreground">
+          {t.rich("homeSearchHint", {
+            kbd: (chunks) => (
+              <kbd className="px-1.5 py-0.5 bg-fd-muted border border-fd-border rounded font-mono text-xs">
+                {chunks}
+              </kbd>
+            ),
+          })}
         </p>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-12">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-5 mb-16">
         {featuredLinks.map((link) => (
           <Link
-            key={link.slug}
-            href={`/docs/${link.slug}`}
-            className="flex flex-col items-center text-center p-6 bg-bg-subtle border border-border rounded-xl
-              hover:border-primary hover:bg-primary/5 transition-all group"
+            key={link.href}
+            href={link.href}
+            className="flex flex-col items-center text-center p-6 bg-fd-card border border-fd-border rounded-xl
+              hover:border-fd-primary hover:bg-fd-accent transition-all group"
           >
-            <span className="material-symbols-outlined text-3xl text-primary mb-3">
+            <span className="material-symbols-outlined text-3xl text-fd-primary mb-3">
               {link.icon}
             </span>
-            <span className="font-semibold text-text-main group-hover:text-primary transition-colors">
-              {link.title}
+            <span className="font-semibold text-fd-foreground group-hover:text-fd-primary transition-colors">
+              {t(link.titleKey)}
             </span>
-            <span className="text-sm text-text-muted mt-1">{link.desc}</span>
+            <span className="text-sm text-fd-muted-foreground mt-2">{t(link.descriptionKey)}</span>
           </Link>
         ))}
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {docsNavigation.map((section, sectionIdx) => (
-          <div
-            key={sectionIdx}
-            className="border border-border rounded-xl p-6 hover:border-primary/50 transition-colors"
-          >
-            <h2 className="text-lg font-bold text-text-main mb-4">{section.title}</h2>
-            <ul className="space-y-2">
-              {section.items.map((item) => (
-                <li key={item.slug}>
-                  <Link
-                    href={`/docs/${item.slug}`}
-                    className="text-sm text-text-muted hover:text-primary hover:underline transition-colors"
-                  >
-                    {item.title}
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          </div>
-        ))}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 pb-12">
+        {sections.map((section) => {
+          const sectionPages = pages.filter((p) =>
+            section.folders.some((folder) => p.url.startsWith(`/docs/${folder}/`))
+          );
+          return (
+            <div
+              key={section.titleKey}
+              className="border border-fd-border rounded-xl p-6 hover:border-fd-primary/30 transition-colors bg-fd-card/50"
+            >
+              <div className="flex items-center gap-3 mb-4">
+                <span className="material-symbols-outlined text-2xl text-fd-primary">
+                  {section.icon}
+                </span>
+                <div>
+                  <h2 className="text-base font-semibold text-fd-foreground">
+                    {t(section.titleKey)}
+                  </h2>
+                  <p className="text-sm text-fd-muted-foreground">{t(section.subtitleKey)}</p>
+                </div>
+              </div>
+              <ul className="space-y-2.5">
+                {sectionPages.map((page) => (
+                  <li key={page.url}>
+                    <Link
+                      href={page.url}
+                      className="text-sm text-fd-muted-foreground hover:text-fd-primary transition-colors"
+                    >
+                      {page.data.title}
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          );
+        })}
       </div>
-
-      <WhatsNewSection />
     </div>
   );
 }

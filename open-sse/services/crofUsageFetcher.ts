@@ -29,8 +29,13 @@
  * Registration: call registerCrofUsageFetcher() once at server startup.
  */
 
-import { registerQuotaFetcher, type QuotaInfo } from "./quotaPreflight.ts";
+import {
+  registerQuotaCacheInvalidator,
+  registerQuotaFetcher,
+  type QuotaInfo,
+} from "./quotaPreflight.ts";
 import { registerMonitorFetcher } from "./quotaMonitor.ts";
+import { throttleQuotaFetch } from "./quotaFetchThrottle.ts";
 
 const CROF_USAGE_URL = "https://crof.ai/usage_api/";
 const CACHE_TTL_MS = 60_000;
@@ -137,6 +142,8 @@ export async function fetchCrofUsage(
   }
 
   try {
+    // #6911: space concurrent upstream quota fetches (mirrors codexQuotaFetcher.ts).
+    await throttleQuotaFetch();
     const response = await fetch(CROF_USAGE_URL, {
       method: "GET",
       headers: {
@@ -178,5 +185,6 @@ export function invalidateCrofUsageCache(connectionId: string): void {
  */
 export function registerCrofUsageFetcher(): void {
   registerQuotaFetcher("crof", fetchCrofUsage);
+  registerQuotaCacheInvalidator("crof", invalidateCrofUsageCache);
   registerMonitorFetcher("crof", fetchCrofUsage);
 }

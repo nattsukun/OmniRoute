@@ -1,5 +1,14 @@
 import type { RtkFilterDefinition } from "./filterSchema.ts";
 import { smartTruncate } from "./smartTruncate.ts";
+import { deduplicateRepeatedLines } from "./deduplicator.ts";
+import { severityPattern } from "./severityVocabulary.ts";
+
+/**
+ * The shared severity vocabulary, compiled once (see severityVocabulary.ts for why it is
+ * shared rather than duplicated per layer). Used to let diagnostic lines bypass the keep
+ * stage below.
+ */
+const SEVERITY_PATTERN = severityPattern();
 
 export interface LineFilterResult {
   text: string;
@@ -8,30 +17,41 @@ export interface LineFilterResult {
   appliedRules: string[];
 }
 
+// ──────────────── RegExp cache ────────────────
+//
+// Patterns are static (loaded from filter JSON files on boot) but were being
+// compiled via `new RegExp(...)` on every call to applyLineFilter().  For a
+// busy proxy this means thousands of redundant RegExp instantiations per
+// second.  Cache them here once.
+
+const regexCache = new Map<string, RegExp>();
+
+function cachedRegExp(pattern: string, flags: string): RegExp | null {
+  const key = `${pattern}::${flags}`;
+  const cached = regexCache.get(key);
+  if (cached) return cached;
+  try {
+    const re = new RegExp(pattern, flags);
+    regexCache.set(key, re);
+    return re;
+  } catch {
+    return null;
+  }
+}
+
 function compilePatterns(patterns: string[]): RegExp[] {
   return patterns.flatMap((pattern) => {
-    try {
-      return [new RegExp(pattern, "i")];
-    } catch {
-      return [];
-    }
+    const re = cachedRegExp(pattern, "i");
+    return re ? [re] : [];
   });
 }
 
 function compileGlobalPattern(pattern: string): RegExp | null {
-  try {
-    return new RegExp(pattern, "g");
-  } catch {
-    return null;
-  }
+  return cachedRegExp(pattern, "g");
 }
 
 function compileBlobPattern(pattern: string): RegExp | null {
-  try {
-    return new RegExp(pattern, "im");
-  } catch {
-    return null;
-  }
+  return cachedRegExp(pattern, "im");
 }
 
 function stripAnsi(text: string): string {
@@ -40,6 +60,41 @@ function stripAnsi(text: string): string {
 
 function normalizeStderrPrefix(line: string): string {
   return line.replace(/^\s*(?:stderr|err)\s*(?:\||:)\s*/i, "");
+}
+
+function applyRtkTomlLineLimits(
+  lines: string[],
+  filter: RtkFilterDefinition,
+  appliedRules: string[]
+): string[] {
+  const head = filter.rtkTomlHeadLines;
+  const tail = filter.rtkTomlTailLines;
+  const total = lines.length;
+
+  if (head !== undefined && tail !== undefined) {
+    if (total > head + tail) {
+      lines = [
+        ...lines.slice(0, head),
+        `... (${total - head - tail} lines omitted)`,
+        ...(tail > 0 ? lines.slice(-tail) : []),
+      ];
+      appliedRules.push(`${filter.id}:rtk-head-tail`);
+    }
+  } else if (head !== undefined && total > head) {
+    lines = [...lines.slice(0, head), `... (${total - head} lines omitted)`];
+    appliedRules.push(`${filter.id}:rtk-head`);
+  } else if (tail !== undefined && total > tail) {
+    lines = [`... (${total - tail} lines omitted)`, ...(tail > 0 ? lines.slice(-tail) : [])];
+    appliedRules.push(`${filter.id}:rtk-tail`);
+  }
+
+  const maxLines = filter.rtkTomlMaxLines;
+  if (maxLines !== undefined && lines.length > maxLines) {
+    const dropped = lines.length - maxLines;
+    lines = [...lines.slice(0, maxLines), `... (${dropped} lines truncated)`];
+    appliedRules.push(`${filter.id}:rtk-max-lines`);
+  }
+  return lines;
 }
 
 function truncateUnicodeSafe(line: string, maxChars: number): string {
@@ -58,6 +113,7 @@ export function applyLineFilter(text: string, filter: RtkFilterDefinition): Line
   const appliedRules: string[] = [];
 
   let lines = text.split(/\r?\n/);
+  if (filter.sourceFormat === "rtk-toml-v1" && lines.at(-1) === "") lines.pop();
   const originalLineCount = lines.length;
 
   if (filter.stripAnsi) {
@@ -109,7 +165,17 @@ export function applyLineFilter(text: string, filter: RtkFilterDefinition): Line
   }
 
   if (keepPatterns.length > 0) {
-    const kept = lines.filter((line) => keepPatterns.some((pattern) => pattern.test(line)));
+    // Severity lines bypass the keep stage. The stage TRUNCATES (not reorders): a filter whose
+    // `includePatterns` do not mention a diagnostic word delete that line here, before
+    // `priorityPatterns` below is ever consulted — so a `FATAL … rollback required` line died in
+    // a filter that only listed ERROR/WARN. The shared vocabulary (severityVocabulary.ts) is
+    // consulted alongside the filter's own patterns, never instead of them.
+    //
+    // A filter with an EMPTY includePatterns keeps skipping this stage entirely (the guard
+    // above), so no non-severity line starts being dropped where it previously survived.
+    const kept = lines.filter(
+      (line) => keepPatterns.some((pattern) => pattern.test(line)) || SEVERITY_PATTERN.test(line)
+    );
     if (kept.length > 0) {
       lines = kept;
       appliedRules.push(`${filter.id}:keep`);
@@ -134,6 +200,29 @@ export function applyLineFilter(text: string, filter: RtkFilterDefinition): Line
       lines = truncatedLines;
       appliedRules.push(`${filter.id}:truncate-line`);
     }
+  }
+
+  // Per-filter line dedup (opt-in via the filter's `deduplicate` flag): collapse consecutive
+  // duplicate lines before truncation. The engine-wide dedup (config.deduplicateThreshold) is
+  // separate; this lets a single filter force it for its own output.
+  if (filter.deduplicate) {
+    const deduped = deduplicateRepeatedLines(lines.join("\n"));
+    if (deduped.collapsed > 0) {
+      lines = deduped.text.split(/\r?\n/);
+      appliedRules.push(`${filter.id}:deduplicate`);
+    }
+  }
+
+  if (filter.sourceFormat === "rtk-toml-v1") {
+    lines = applyRtkTomlLineLimits(lines, filter, appliedRules);
+    const output = lines.join("\n");
+    const finalOutput = output.trim().length === 0 && filter.onEmpty ? filter.onEmpty : output;
+    return {
+      text: finalOutput,
+      strippedLines: Math.max(0, originalLineCount - finalOutput.split(/\r?\n/).length),
+      keptByRule: keepPatterns.length > 0,
+      appliedRules,
+    };
   }
 
   const truncated = smartTruncate(lines.join("\n"), {

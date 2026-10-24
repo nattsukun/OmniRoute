@@ -1,233 +1,74 @@
-# CLAUDE.md — AI Agent Session Bootstrap (Bahasa Melayu)
+# CLAUDE.md (Bahasa Melayu)
 
-🌐 **Languages:** 🇺🇸 [English](../../../CLAUDE.md) · 🇸🇦 [ar](../ar/CLAUDE.md) · 🇧🇬 [bg](../bg/CLAUDE.md) · 🇧🇩 [bn](../bn/CLAUDE.md) · 🇨🇿 [cs](../cs/CLAUDE.md) · 🇩🇰 [da](../da/CLAUDE.md) · 🇩🇪 [de](../de/CLAUDE.md) · 🇪🇸 [es](../es/CLAUDE.md) · 🇮🇷 [fa](../fa/CLAUDE.md) · 🇫🇮 [fi](../fi/CLAUDE.md) · 🇫🇷 [fr](../fr/CLAUDE.md) · 🇮🇳 [gu](../gu/CLAUDE.md) · 🇮🇱 [he](../he/CLAUDE.md) · 🇮🇳 [hi](../hi/CLAUDE.md) · 🇭🇺 [hu](../hu/CLAUDE.md) · 🇮🇩 [id](../id/CLAUDE.md) · 🇮🇹 [it](../it/CLAUDE.md) · 🇯🇵 [ja](../ja/CLAUDE.md) · 🇰🇷 [ko](../ko/CLAUDE.md) · 🇮🇳 [mr](../mr/CLAUDE.md) · 🇲🇾 [ms](../ms/CLAUDE.md) · 🇳🇱 [nl](../nl/CLAUDE.md) · 🇳🇴 [no](../no/CLAUDE.md) · 🇵🇭 [phi](../phi/CLAUDE.md) · 🇵🇱 [pl](../pl/CLAUDE.md) · 🇵🇹 [pt](../pt/CLAUDE.md) · 🇧🇷 [pt-BR](../pt-BR/CLAUDE.md) · 🇷🇴 [ro](../ro/CLAUDE.md) · 🇷🇺 [ru](../ru/CLAUDE.md) · 🇸🇰 [sk](../sk/CLAUDE.md) · 🇸🇪 [sv](../sv/CLAUDE.md) · 🇰🇪 [sw](../sw/CLAUDE.md) · 🇮🇳 [ta](../ta/CLAUDE.md) · 🇮🇳 [te](../te/CLAUDE.md) · 🇹🇭 [th](../th/CLAUDE.md) · 🇹🇷 [tr](../tr/CLAUDE.md) · 🇺🇦 [uk-UA](../uk-UA/CLAUDE.md) · 🇵🇰 [ur](../ur/CLAUDE.md) · 🇻🇳 [vi](../vi/CLAUDE.md) · 🇨🇳 [zh-CN](../zh-CN/CLAUDE.md)
-
----
-
-> Quick-start context for AI coding agents. For deep architecture details, see `AGENTS.md`.
-> For contribution workflow, see `CONTRIBUTING.md`.
-
-## Mula Pantas
-
-```bash
-npm install                    # Install deps (auto-generates .env from .env.example)
-npm run dev                    # Dev server at http://localhost:20128
-npm run build                  # Production build (Next.js 16 standalone)
-npm run lint                   # ESLint (0 errors expected; warnings are pre-existing)
-npm run typecheck:core         # TypeScript check (should be clean)
-npm run typecheck:noimplicit:core  # Strict check (no implicit any)
-npm run test:coverage          # Unit tests + coverage gate (60% min)
-npm run check                  # lint + test combined
-npm run check:cycles           # Detect circular dependencies
-```
-
-### Running a Single Test
-
-```bash
-# Node.js native test runner (most tests)
-node --import tsx/esm --test tests/unit/your-file.test.mjs
-
-# Vitest (MCP server, autoCombo, cache)
-npm run test:vitest
-```
+🌐 **Languages:** 🇺🇸 [English](../../../CLAUDE.md) · 🇪🇹 [am](../am/CLAUDE.md) · 🇸🇦 [ar](../ar/CLAUDE.md) · 🇦🇿 [az](../az/CLAUDE.md) · 🇧🇬 [bg](../bg/CLAUDE.md) · 🇧🇩 [bn](../bn/CLAUDE.md) · 🇧🇦 [bs](../bs/CLAUDE.md) · 🇨🇿 [cs](../cs/CLAUDE.md) · 🇩🇰 [da](../da/CLAUDE.md) · 🇩🇪 [de](../de/CLAUDE.md) · 🇬🇷 [el](../el/CLAUDE.md) · 🇪🇸 [es](../es/CLAUDE.md) · 🇪🇪 [et](../et/CLAUDE.md) · 🇮🇷 [fa](../fa/CLAUDE.md) · 🇫🇮 [fi](../fi/CLAUDE.md) · 🇫🇷 [fr](../fr/CLAUDE.md) · 🇮🇪 [ga](../ga/CLAUDE.md) · 🇮🇳 [gu](../gu/CLAUDE.md) · 🇳🇬 [ha](../ha/CLAUDE.md) · 🇮🇱 [he](../he/CLAUDE.md) · 🇮🇳 [hi](../hi/CLAUDE.md) · 🇭🇷 [hr](../hr/CLAUDE.md) · 🇭🇺 [hu](../hu/CLAUDE.md) · 🇦🇲 [hy](../hy/CLAUDE.md) · 🇮🇩 [id](../id/CLAUDE.md) · 🇳🇬 [ig](../ig/CLAUDE.md) · 🇮🇹 [it](../it/CLAUDE.md) · 🇯🇵 [ja](../ja/CLAUDE.md) · 🇬🇪 [ka](../ka/CLAUDE.md) · 🇰🇭 [km](../km/CLAUDE.md) · 🇮🇳 [kn](../kn/CLAUDE.md) · 🇰🇷 [ko](../ko/CLAUDE.md) · 🇱🇹 [lt](../lt/CLAUDE.md) · 🇱🇻 [lv](../lv/CLAUDE.md) · 🇮🇳 [ml](../ml/CLAUDE.md) · 🇮🇳 [mr](../mr/CLAUDE.md) · 🇲🇹 [mt](../mt/CLAUDE.md) · 🇲🇲 [my](../my/CLAUDE.md) · 🇳🇵 [ne](../ne/CLAUDE.md) · 🇳🇱 [nl](../nl/CLAUDE.md) · 🇳🇴 [no](../no/CLAUDE.md) · 🇮🇳 [or](../or/CLAUDE.md) · 🇮🇳 [pa](../pa/CLAUDE.md) · 🇵🇭 [phi](../phi/CLAUDE.md) · 🇵🇱 [pl](../pl/CLAUDE.md) · 🇵🇹 [pt](../pt/CLAUDE.md) · 🇧🇷 [pt-BR](../pt-BR/CLAUDE.md) · 🇷🇴 [ro](../ro/CLAUDE.md) · 🇷🇺 [ru](../ru/CLAUDE.md) · 🇱🇰 [si](../si/CLAUDE.md) · 🇸🇰 [sk](../sk/CLAUDE.md) · 🇸🇮 [sl](../sl/CLAUDE.md) · 🇷🇸 [sr](../sr/CLAUDE.md) · 🇸🇪 [sv](../sv/CLAUDE.md) · 🇰🇪 [sw](../sw/CLAUDE.md) · 🇮🇳 [ta](../ta/CLAUDE.md) · 🇮🇳 [te](../te/CLAUDE.md) · 🇹🇭 [th](../th/CLAUDE.md) · 🇹🇷 [tr](../tr/CLAUDE.md) · 🇺🇦 [uk-UA](../uk-UA/CLAUDE.md) · 🇵🇰 [ur](../ur/CLAUDE.md) · 🇺🇿 [uz](../uz/CLAUDE.md) · 🇻🇳 [vi](../vi/CLAUDE.md) · 🇳🇬 [yo](../yo/CLAUDE.md) · 🇨🇳 [zh-CN](../zh-CN/CLAUDE.md) · 🇹🇼 [zh-TW](../zh-TW/CLAUDE.md)
 
 ---
 
-## Gambaran Keseluruhan
+@AGENTS.md
 
-**OmniRoute** — unified AI proxy/router. One endpoint, 100+ LLM providers, auto-fallback.
+**Semua peraturan projek terkandung dalam [`AGENTS.md`](AGENTS.md)** — sumber kebenaran tunggal untuk setiap
+pembantu AI (seni bina, konvensyen, pengujian, gerbang kualiti, aliran kerja git, 23 Peraturan Tegas,
+pembelajaran PII). Baca sepenuhnya; jangan tambahkan semula peraturan projek di sini. Semua perkara di bawah terpakai HANYA
+untuk Claude Code — penambahbaikan operasi terhadap peraturan yang telah ditakrifkan dalam `AGENTS.md`.
 
-| Layer           | Location                 | Purpose                                    |
-| --------------- | ------------------------ | ------------------------------------------ |
-| API Routes      | `src/app/api/v1/`        | Next.js App Router — entry points          |
-| Handlers        | `open-sse/handlers/`     | Request processing (chat, embeddings, etc) |
-| Executors       | `open-sse/executors/`    | Provider-specific HTTP dispatch            |
-| Translators     | `open-sse/translator/`   | Format conversion (OpenAI↔Claude↔Gemini)   |
-| Services        | `open-sse/services/`     | Combo routing, rate limits, caching, etc   |
-| Database        | `src/lib/db/`            | SQLite domain modules (22 files)           |
-| Domain/Policy   | `src/domain/`            | Policy engine, cost rules, fallback logic  |
-| MCP Server      | `open-sse/mcp-server/`   | 25 tools, 3 transports, 10 scopes          |
-| A2A Server      | `src/lib/a2a/`           | JSON-RPC 2.0 agent protocol                |
-| Skills          | `src/lib/skills/`        | Extensible skill framework                 |
-| Memory          | `src/lib/memory/`        | Persistent conversational memory           |
-| UI Components   | `src/shared/components/` | React components (Tailwind CSS v4)         |
-| Provider Consts | `src/shared/constants/`  | Provider registry (Zod-validated)          |
-| Validation      | `src/shared/validation/` | Zod v4 schemas                             |
-| Tests           | `tests/`                 | Unit, integration, e2e, security, load     |
+## Pengasingan worktree — perkara khusus Claude Code
 
-### Monorepo Layout
+Protokol worktree mandatori yang lengkap (pengesahan cabang asas, laluan kanonik
+`.claude/worktrees/`, `cp -al` node_modules, peraturan penghapusan) terdapat dalam `AGENTS.md` → Aliran Kerja Git → "Pengasingan
+worktree". Perkara khusus Claude Code:
 
-```
-OmniRoute/              # Root package
-├── src/                # Next.js 16 app (TypeScript)
-├── open-sse/           # @omniroute/open-sse workspace (streaming engine)
-├── electron/           # Desktop app (Electron)
-├── tests/              # All test suites
-├── docs/               # Documentation
-└── bin/                # CLI entry point
-```
+- Sahkan cabang asas dengan operator melalui `AskUserQuestion` (Peraturan Tegas #19) melainkan mereka
+  telah memaklumkannya kepada anda.
+- Utamakan alat natif `EnterWorktree` — alat ini sememangnya mencipta worktree di bawah
+  `.claude/worktrees/` (laluan kanonik). Cipta worktree menggunakan perintah `git
+worktree add` yang didokumentasikan, kemudian panggil `EnterWorktree` dengan `path` worktree tersebut.
 
----
+## Keselamatan merentas sesi — perkara khusus Claude Code
 
-## Request Pipeline (Abbreviated)
+Peraturan Tegas #19/#21/#22 (dalam `AGENTS.md`) mengawal sesi selari. Peringatan operasi untuk
+persekitaran ini:
 
-```
-Client → /v1/chat/completions (Next.js route)
-  → CORS → Zod validation → auth? → policy check → prompt injection guard
-  → handleChatCore() [open-sse/handlers/chatCore.ts]
-    → cache check → rate limit → combo routing?
-      → resolveComboTargets() → handleSingleModel() per target
-    → translateRequest() → getExecutor() → executor.execute()
-      → fetch() upstream → retry w/ backoff
-    → response translation → SSE stream or JSON
-```
+- **Salin larangan `git stash` secara verbatim ke dalam gesaan setiap subagen yang menyentuh git**
+  (alat Agent / skrip Workflow) — subagen tidak mewarisi fail ini, dan kejadian berulang
+  bagi insiden stash yang direkodkan berlaku melalui subagen.
+- Sebelum menggabungkan atau menolak ke mana-mana PR yang tidak anda cipta _dalam sesi ini_, jalankan `git worktree list`
+  dan semak semula `gh pr view <N> --json state,headRefOid` (Peraturan Tegas #22b).
+- Akhiri setiap sesi dengan checkout utama berada pada cabang yang sama seperti ketika sesi bermula.
 
----
+## Superpowers / artifak perancangan — penggantian laluan
 
-## Key Conventions
+Konvensyen `_tasks/` ditakrifkan dalam `AGENTS.md` → "Artifak Perancangan & Penyelidikan". Kemahiran
+superpowers disediakan dengan lalai yang menghala ke `docs/…` — lalai tersebut **digantikan
+di sini**. Apabila kemahiran superpowers mengumumkan laluan seperti "disimpan ke `docs/superpowers/plans/…`",
+tulis semula kepada laluan `_tasks/…` yang setara sebelum menulis:
 
-### Code Style
+| Artifak (kemahiran)                         | Lalai (JANGAN gunakan)    | Simpan di sini sebagai ganti                                  |
+| ------------------------------------------- | ------------------------- | ------------------------------------------------------------- |
+| Pelan (`writing-plans`)                     | `docs/superpowers/plans/` | `_tasks/superpowers/plans/YYYY-MM-DD-<feature>.md`            |
+| Spesifikasi / reka bentuk (`brainstorming`) | `docs/superpowers/specs/` | `_tasks/superpowers/specs/YYYY-MM-DD-<topic>-design.md`       |
+| Penyelidikan (`deep-research`, ad-hoc)      | `docs/research/`          | `_tasks/research/…`                                           |
+| Serahan (`/handoff`)                        | —                         | `_tasks/hands-off/<YYYY-MM-DD>_<branch>_v<versão>_sess-<id>/` |
 
-- **2 spaces**, semicolons, double quotes, 100 char width, es5 trailing commas
-- **Imports**: external → internal (`@/`, `@omniroute/open-sse`) → relative
-- **Naming**: files=camelCase/kebab, components=PascalCase, constants=UPPER_SNAKE
+Commit artifak tersebut di dalam repo `_tasks/` (`git -C _tasks …`), jangan sekali-kali dalam repo utama.
 
-### Database Access
+## Fail contengan / sementara — gunakan `_artifacts/`, bukan `/tmp`
 
-- **Always** go through `src/lib/db/` domain modules
-- **Never** write raw SQL in routes or handlers
-- **Never** add logic to `src/lib/localDb.ts` (re-export layer only)
-- **Never** barrel-import from `localDb.ts` — import specific `db/` modules
-- DB singleton: `getDbInstance()` from `src/lib/db/core.ts` (WAL journaling)
-- Migrations: `src/lib/db/migrations/` — 21 versioned SQL files
+Projek ini menggantikan pad contengan sesi lalai persekitaran (`/tmp/claude-*/…`). Tulis
+fail sementara/kerja — eksport, zip yang dijana, output perantaraan sekali guna, apa-apa sahaja yang
+biasanya anda letakkan dalam `/tmp` — ke `/home/diegosouzapw/dev/proxys/OmniRoute/_artifacts/` sebagai ganti.
 
-### Error Handling
+- `_artifacts/` ialah laluan akar `_*`: sudah diabaikan oleh git (`AGENTS.md` → "Laluan akar `_*`"), hanya wujud
+  pada cakera, tidak pernah dijejaki.
+- Sebab: menyimpan output contengan di dalam projek (berbanding `/tmp`) memudahkan operator
+  mencari dan memadam semua perkara sementara di satu tempat, dan bukannya mencarinya merentasi
+  direktori `/tmp` khusus sesi yang bersifat sementara, yang hilang atau mengumpulkan fail tidak dijejaki.
+- Jangan **kelirukan** ini dengan `_tasks/` (Peraturan Tegas #23, repo git peribadinya sendiri untuk
+  pelan/spesifikasi/penyelidikan/serahan yang berkekalan) — `_artifacts/` hanya untuk fail kerja yang boleh dibuang, tiada apa-apa
+  di sini yang perlu dikekalkan atau diversi.
 
-- try/catch with specific error types, log with pino context
-- Never swallow errors in SSE streams — use abort signals
-- Return proper HTTP status codes (4xx/5xx)
+## Pastikan asas hijau sebelum membuka PR
 
-### Keselamatan
-
-- **Never** commit secrets/credentials
-- **Never** use `eval()`, `new Function()`, or implied eval
-- Validate all inputs with Zod schemas
-- Encrypt credentials at rest (AES-256-GCM)
-
----
-
-## Common Modification Scenarios
-
-### Adding a New Provider
-
-1. Register in `src/shared/constants/providers.ts` (Zod-validated at load)
-2. Add executor in `open-sse/executors/` if custom logic needed
-3. Add translator in `open-sse/translator/` if non-OpenAI format
-4. Add OAuth config in `src/lib/oauth/constants/oauth.ts` if OAuth-based
-5. Register models in `open-sse/config/providerRegistry.ts`
-6. Write tests in `tests/unit/` (registration, translation, error handling)
-
-### Adding a New API Route
-
-1. Create directory under `src/app/api/v1/your-route/`
-2. Create `route.ts` with `GET`/`POST` handlers
-3. Follow pattern: CORS → Zod body validation → optional auth → handler delegation
-4. Handler goes in `open-sse/handlers/` (import from there, not inline)
-5. Add tests
-
-### Adding a New DB Module
-
-1. Create `src/lib/db/yourModule.ts`
-2. Import `getDbInstance` from `./core.ts`
-3. Export CRUD functions for your domain table(s)
-4. Add migration in `src/lib/db/migrations/` if new tables needed
-5. Re-export from `src/lib/localDb.ts` (add to the re-export list only)
-6. Write tests
-
-### Adding a New MCP Tool
-
-1. Add tool definition in `open-sse/mcp-server/tools/`
-2. Define Zod input schema + async handler
-3. Register in tool set (wired by `createMcpServer()`)
-4. Assign to appropriate scope(s)
-5. Write tests (tool invocation logged to `mcp_audit` table)
-
-### Adding a New A2A Skill
-
-1. Create skill in `src/lib/a2a/skills/`
-2. Skill receives task context (messages, metadata) → returns structured result
-3. Register in the DB-backed skill registry
-4. Write tests
-
----
-
-## Testing Cheat Sheet
-
-| What                    | Command                                                 |
-| ----------------------- | ------------------------------------------------------- |
-| All tests               | `npm run test:all`                                      |
-| Unit tests              | `npm run test:unit`                                     |
-| Single file             | `node --import tsx/esm --test tests/unit/file.test.mjs` |
-| Vitest (MCP, autoCombo) | `npm run test:vitest`                                   |
-| E2E (Playwright)        | `npm run test:e2e`                                      |
-| Protocol E2E (MCP+A2A)  | `npm run test:protocols:e2e`                            |
-| Ecosystem               | `npm run test:ecosystem`                                |
-| Coverage gate           | `npm run test:coverage` (60% min all metrics)           |
-| Coverage report         | `npm run coverage:report`                               |
-
-**PR rule**: If you change production code in `src/`, `open-sse/`, `electron/`, or `bin/`,
-you must include or update tests in the same PR.
-
-**Test layer preference**: unit first → integration (multi-module or DB state) → e2e (UI/workflow only). Encode bug reproductions as automated tests before or alongside the fix.
-
----
-
-## Git Workflow
-
-```bash
-# Never commit directly to main
-git checkout -b feat/your-feature
-# ... make changes ...
-git commit -m "feat: describe your change"
-git push -u origin feat/your-feature
-```
-
-**Branch prefixes**: `feat/`, `fix/`, `refactor/`, `docs/`, `test/`, `chore/`
-
-**Commit format** ([Conventional Commits](https://www.conventionalcommits.org/)):
-
-```
-feat: add circuit breaker for provider calls
-fix: resolve JWT secret validation edge case
-docs: update AGENTS.md with pipeline internals
-test: add MCP tool unit tests
-refactor(db): consolidate rate limit tables
-```
-
-**Scopes**: `db`, `sse`, `oauth`, `dashboard`, `api`, `cli`, `docker`, `ci`, `mcp`, `a2a`,
-`memory`, `skills`.
-
----
-
-## Environment
-
-- **Runtime**: Node.js ≥18 <24, ES Modules
-- **TypeScript**: 5.9, target ES2022, module esnext, resolution bundler
-- **Path aliases**: `@/*` → `src/`, `@omniroute/open-sse` → `open-sse/`
-- **Default port**: 20128 (API + dashboard on same port)
-- **Data directory**: `DATA_DIR` env var, defaults to `~/.omniroute/`
-- **Key env vars**: `PORT`, `JWT_SECRET`, `INITIAL_PASSWORD`, `REQUIRE_API_KEY`, `APP_LOG_LEVEL`
-
----
-
-## Hard Rules (Never Violate)
-
-1. Never commit secrets or credentials
-2. Never add logic to `localDb.ts`
-3. Never use `eval()` / `new Function()` / implied eval
-4. Never commit directly to `main`
-5. Never write raw SQL in routes — use `src/lib/db/` modules
-6. Never silently swallow errors in SSE streams
-7. Always validate inputs with Zod schemas
-8. Always include tests when changing production code
-9. Coverage must stay ≥60% (statements, lines, functions, branches)
+Sebelum mencipta cabang atau membuka PR, jalankan semakan asas hijau (`AGENTS.md` → Aliran Kerja Git →
+"Semakan asas hijau"; kemahiran projek merujuknya sebagai `.agents/skills/_shared/base-green.md`). PR
+yang dibuka ketika tip asas berstatus merah mesti mengandungi `⚠️ base-red inherited: #<issue>` dalam badannya. Untuk
+menghapuskan keadaan merah yang terkumpul (tip asas + PR merah), gunakan kemahiran `/sweep-reds`.

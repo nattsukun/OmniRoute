@@ -14,21 +14,21 @@ import { saveCliToolLastConfigured, deleteCliToolLastConfigured } from "@/lib/db
 import { cliModelConfigSchema } from "@/shared/validation/schemas";
 import { isValidationFailure, validateBody } from "@/shared/validation/helpers";
 import { resolveApiKey } from "@/shared/services/apiKeyResolver";
+import { readJsoncConfig } from "../_lib/jsoncConfig";
+import {
+  configClobberRefusalResponse,
+  parseJsoncObject,
+  readExistingConfig,
+} from "../_lib/readExistingConfig";
 
 const getOpenClawSettingsPath = () => getCliPrimaryConfigPath("openclaw");
 const getOpenClawDir = () => path.dirname(getOpenClawSettingsPath());
 
-// Read current settings.json
-const readSettings = async () => {
-  try {
-    const settingsPath = getOpenClawSettingsPath();
-    const content = await fs.readFile(settingsPath, "utf-8");
-    return JSON.parse(content);
-  } catch (error: any) {
-    if (error.code === "ENOENT") return null;
-    throw error;
-  }
-};
+// Read current settings.json.
+// Ported from upstream decolua/9router@6c10edf8: tolerate JSONC (trailing
+// commas) and return null on any parse error so the dashboard renders
+// "installed but not configured" instead of a 500 misread as "not installed".
+const readSettings = async () => readJsoncConfig(getOpenClawSettingsPath());
 
 // Check if settings has OmniRoute config
 const hasOmniRouteConfig = (settings: any) => {
@@ -124,14 +124,10 @@ export async function POST(request: Request) {
     // Backup current settings before modifying
     await createBackup("openclaw", settingsPath);
 
-    // Read existing settings or create new
-    let settings: Record<string, any> = {};
-    try {
-      const existingSettings = await fs.readFile(settingsPath, "utf-8");
-      settings = JSON.parse(existingSettings);
-    } catch {
-      /* No existing settings */
-    }
+    // Read existing settings or create new. Only a missing file starts fresh —
+    // an unreadable/unparsable one is refused (409) instead of being replaced.
+    const settings: Record<string, any> =
+      (await readExistingConfig(settingsPath, parseJsoncObject)) ?? {};
 
     // Ensure structure exists
     if (!settings.agents) settings.agents = {};
@@ -175,6 +171,8 @@ export async function POST(request: Request) {
       settingsPath,
     });
   } catch (error) {
+    const refusal = configClobberRefusalResponse(error);
+    if (refusal) return refusal;
     console.log("Error updating openclaw settings:", error);
     return NextResponse.json({ error: "Failed to update openclaw settings" }, { status: 500 });
   }

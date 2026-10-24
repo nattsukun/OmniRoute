@@ -1,233 +1,73 @@
-# CLAUDE.md — AI Agent Session Bootstrap (বাংলা)
+# CLAUDE.md (বাংলা)
 
-🌐 **Languages:** 🇺🇸 [English](../../../CLAUDE.md) · 🇸🇦 [ar](../ar/CLAUDE.md) · 🇧🇬 [bg](../bg/CLAUDE.md) · 🇧🇩 [bn](../bn/CLAUDE.md) · 🇨🇿 [cs](../cs/CLAUDE.md) · 🇩🇰 [da](../da/CLAUDE.md) · 🇩🇪 [de](../de/CLAUDE.md) · 🇪🇸 [es](../es/CLAUDE.md) · 🇮🇷 [fa](../fa/CLAUDE.md) · 🇫🇮 [fi](../fi/CLAUDE.md) · 🇫🇷 [fr](../fr/CLAUDE.md) · 🇮🇳 [gu](../gu/CLAUDE.md) · 🇮🇱 [he](../he/CLAUDE.md) · 🇮🇳 [hi](../hi/CLAUDE.md) · 🇭🇺 [hu](../hu/CLAUDE.md) · 🇮🇩 [id](../id/CLAUDE.md) · 🇮🇹 [it](../it/CLAUDE.md) · 🇯🇵 [ja](../ja/CLAUDE.md) · 🇰🇷 [ko](../ko/CLAUDE.md) · 🇮🇳 [mr](../mr/CLAUDE.md) · 🇲🇾 [ms](../ms/CLAUDE.md) · 🇳🇱 [nl](../nl/CLAUDE.md) · 🇳🇴 [no](../no/CLAUDE.md) · 🇵🇭 [phi](../phi/CLAUDE.md) · 🇵🇱 [pl](../pl/CLAUDE.md) · 🇵🇹 [pt](../pt/CLAUDE.md) · 🇧🇷 [pt-BR](../pt-BR/CLAUDE.md) · 🇷🇴 [ro](../ro/CLAUDE.md) · 🇷🇺 [ru](../ru/CLAUDE.md) · 🇸🇰 [sk](../sk/CLAUDE.md) · 🇸🇪 [sv](../sv/CLAUDE.md) · 🇰🇪 [sw](../sw/CLAUDE.md) · 🇮🇳 [ta](../ta/CLAUDE.md) · 🇮🇳 [te](../te/CLAUDE.md) · 🇹🇭 [th](../th/CLAUDE.md) · 🇹🇷 [tr](../tr/CLAUDE.md) · 🇺🇦 [uk-UA](../uk-UA/CLAUDE.md) · 🇵🇰 [ur](../ur/CLAUDE.md) · 🇻🇳 [vi](../vi/CLAUDE.md) · 🇨🇳 [zh-CN](../zh-CN/CLAUDE.md)
-
----
-
-> Quick-start context for AI coding agents. For deep architecture details, see `AGENTS.md`.
-> For contribution workflow, see `CONTRIBUTING.md`.
-
-## Inicio Rápido
-
-```bash
-npm install                    # Install deps (auto-generates .env from .env.example)
-npm run dev                    # Dev server at http://localhost:20128
-npm run build                  # Production build (Next.js 16 standalone)
-npm run lint                   # ESLint (0 errors expected; warnings are pre-existing)
-npm run typecheck:core         # TypeScript check (should be clean)
-npm run typecheck:noimplicit:core  # Strict check (no implicit any)
-npm run test:coverage          # Unit tests + coverage gate (60% min)
-npm run check                  # lint + test combined
-npm run check:cycles           # Detect circular dependencies
-```
-
-### Running a Single Test
-
-```bash
-# Node.js native test runner (most tests)
-node --import tsx/esm --test tests/unit/your-file.test.mjs
-
-# Vitest (MCP server, autoCombo, cache)
-npm run test:vitest
-```
+🌐 **Languages:** 🇺🇸 [English](../../../CLAUDE.md) · 🇪🇹 [am](../am/CLAUDE.md) · 🇸🇦 [ar](../ar/CLAUDE.md) · 🇦🇿 [az](../az/CLAUDE.md) · 🇧🇬 [bg](../bg/CLAUDE.md) · 🇧🇦 [bs](../bs/CLAUDE.md) · 🇨🇿 [cs](../cs/CLAUDE.md) · 🇩🇰 [da](../da/CLAUDE.md) · 🇩🇪 [de](../de/CLAUDE.md) · 🇬🇷 [el](../el/CLAUDE.md) · 🇪🇸 [es](../es/CLAUDE.md) · 🇪🇪 [et](../et/CLAUDE.md) · 🇮🇷 [fa](../fa/CLAUDE.md) · 🇫🇮 [fi](../fi/CLAUDE.md) · 🇫🇷 [fr](../fr/CLAUDE.md) · 🇮🇪 [ga](../ga/CLAUDE.md) · 🇮🇳 [gu](../gu/CLAUDE.md) · 🇳🇬 [ha](../ha/CLAUDE.md) · 🇮🇱 [he](../he/CLAUDE.md) · 🇮🇳 [hi](../hi/CLAUDE.md) · 🇭🇷 [hr](../hr/CLAUDE.md) · 🇭🇺 [hu](../hu/CLAUDE.md) · 🇦🇲 [hy](../hy/CLAUDE.md) · 🇮🇩 [id](../id/CLAUDE.md) · 🇳🇬 [ig](../ig/CLAUDE.md) · 🇮🇹 [it](../it/CLAUDE.md) · 🇯🇵 [ja](../ja/CLAUDE.md) · 🇬🇪 [ka](../ka/CLAUDE.md) · 🇰🇭 [km](../km/CLAUDE.md) · 🇮🇳 [kn](../kn/CLAUDE.md) · 🇰🇷 [ko](../ko/CLAUDE.md) · 🇱🇹 [lt](../lt/CLAUDE.md) · 🇱🇻 [lv](../lv/CLAUDE.md) · 🇮🇳 [ml](../ml/CLAUDE.md) · 🇮🇳 [mr](../mr/CLAUDE.md) · 🇲🇾 [ms](../ms/CLAUDE.md) · 🇲🇹 [mt](../mt/CLAUDE.md) · 🇲🇲 [my](../my/CLAUDE.md) · 🇳🇵 [ne](../ne/CLAUDE.md) · 🇳🇱 [nl](../nl/CLAUDE.md) · 🇳🇴 [no](../no/CLAUDE.md) · 🇮🇳 [or](../or/CLAUDE.md) · 🇮🇳 [pa](../pa/CLAUDE.md) · 🇵🇭 [phi](../phi/CLAUDE.md) · 🇵🇱 [pl](../pl/CLAUDE.md) · 🇵🇹 [pt](../pt/CLAUDE.md) · 🇧🇷 [pt-BR](../pt-BR/CLAUDE.md) · 🇷🇴 [ro](../ro/CLAUDE.md) · 🇷🇺 [ru](../ru/CLAUDE.md) · 🇱🇰 [si](../si/CLAUDE.md) · 🇸🇰 [sk](../sk/CLAUDE.md) · 🇸🇮 [sl](../sl/CLAUDE.md) · 🇷🇸 [sr](../sr/CLAUDE.md) · 🇸🇪 [sv](../sv/CLAUDE.md) · 🇰🇪 [sw](../sw/CLAUDE.md) · 🇮🇳 [ta](../ta/CLAUDE.md) · 🇮🇳 [te](../te/CLAUDE.md) · 🇹🇭 [th](../th/CLAUDE.md) · 🇹🇷 [tr](../tr/CLAUDE.md) · 🇺🇦 [uk-UA](../uk-UA/CLAUDE.md) · 🇵🇰 [ur](../ur/CLAUDE.md) · 🇺🇿 [uz](../uz/CLAUDE.md) · 🇻🇳 [vi](../vi/CLAUDE.md) · 🇳🇬 [yo](../yo/CLAUDE.md) · 🇨🇳 [zh-CN](../zh-CN/CLAUDE.md) · 🇹🇼 [zh-TW](../zh-TW/CLAUDE.md)
 
 ---
 
-## Resumen
+@AGENTS.md
 
-**OmniRoute** — unified AI proxy/router. One endpoint, 100+ LLM providers, auto-fallback.
+**প্রকল্পের সব নিয়ম [`AGENTS.md`](AGENTS.md)-এ রয়েছে** — প্রতিটি AI
+সহকারীর জন্য এটিই একমাত্র নির্ভরযোগ্য উৎস (আর্কিটেকচার, কনভেনশন, টেস্টিং, কোয়ালিটি গেট, git ওয়ার্কফ্লো, 23টি কঠোর নিয়ম,
+PII-সংক্রান্ত শিক্ষা)। এটি সম্পূর্ণ পড়ুন; এখানে প্রকল্পের নিয়ম পুনরায় যোগ করবেন না। নিচের সবকিছু শুধু
+Claude Code-এর ক্ষেত্রে প্রযোজ্য — `AGENTS.md`-এ ইতিমধ্যে সংজ্ঞায়িত নিয়মগুলোর কার্যকরী পরিমার্জন।
 
-| Layer           | Location                 | Purpose                                    |
-| --------------- | ------------------------ | ------------------------------------------ |
-| API Routes      | `src/app/api/v1/`        | Next.js App Router — entry points          |
-| Handlers        | `open-sse/handlers/`     | Request processing (chat, embeddings, etc) |
-| Executors       | `open-sse/executors/`    | Provider-specific HTTP dispatch            |
-| Translators     | `open-sse/translator/`   | Format conversion (OpenAI↔Claude↔Gemini)   |
-| Services        | `open-sse/services/`     | Combo routing, rate limits, caching, etc   |
-| Database        | `src/lib/db/`            | SQLite domain modules (22 files)           |
-| Domain/Policy   | `src/domain/`            | Policy engine, cost rules, fallback logic  |
-| MCP Server      | `open-sse/mcp-server/`   | 25 tools, 3 transports, 10 scopes          |
-| A2A Server      | `src/lib/a2a/`           | JSON-RPC 2.0 agent protocol                |
-| Skills          | `src/lib/skills/`        | Extensible skill framework                 |
-| Memory          | `src/lib/memory/`        | Persistent conversational memory           |
-| UI Components   | `src/shared/components/` | React components (Tailwind CSS v4)         |
-| Provider Consts | `src/shared/constants/`  | Provider registry (Zod-validated)          |
-| Validation      | `src/shared/validation/` | Zod v4 schemas                             |
-| Tests           | `tests/`                 | Unit, integration, e2e, security, load     |
+## Worktree বিচ্ছিন্নতা — Claude Code-এর নির্দিষ্ট বিষয়
 
-### Monorepo Layout
+সম্পূর্ণ বাধ্যতামূলক worktree প্রোটোকল (বেস-ব্রাঞ্চ নিশ্চিতকরণ, `.claude/worktrees/` ক্যানোনিক্যাল
+পাথ, `cp -al` node_modules, অপসারণের নিয়ম) `AGENTS.md` → Git Workflow → "Worktree
+isolation"-এ রয়েছে। Claude Code-এর নির্দিষ্ট বিষয়গুলো:
 
-```
-OmniRoute/              # Root package
-├── src/                # Next.js 16 app (TypeScript)
-├── open-sse/           # @omniroute/open-sse workspace (streaming engine)
-├── electron/           # Desktop app (Electron)
-├── tests/              # All test suites
-├── docs/               # Documentation
-└── bin/                # CLI entry point
-```
+- অপারেটর আগে থেকে না জানিয়ে থাকলে `AskUserQuestion`-এর মাধ্যমে বেস ব্রাঞ্চ নিশ্চিত করুন (কঠোর নিয়ম #19)।
+- নেটিভ `EnterWorktree` টুলটিকে অগ্রাধিকার দিন — এটি ইতিমধ্যেই
+  `.claude/worktrees/`-এর (ক্যানোনিক্যাল পাথ) অধীনে worktree তৈরি করে। নথিভুক্ত `git
+worktree add` কমান্ড দিয়ে worktree তৈরি করুন, এরপর এর `path` দিয়ে `EnterWorktree` কল করুন।
 
----
+## ক্রস-সেশন নিরাপত্তা — Claude Code-এর নির্দিষ্ট বিষয়
 
-## Request Pipeline (Abbreviated)
+কঠোর নিয়ম #19/#21/#22 (`AGENTS.md`-এ) সমান্তরাল সেশন নিয়ন্ত্রণ করে। এই
+হারনেসের জন্য কার্যকরী স্মারক:
 
-```
-Client → /v1/chat/completions (Next.js route)
-  → CORS → Zod validation → auth? → policy check → prompt injection guard
-  → handleChatCore() [open-sse/handlers/chatCore.ts]
-    → cache check → rate limit → combo routing?
-      → resolveComboTargets() → handleSingleModel() per target
-    → translateRequest() → getExecutor() → executor.execute()
-      → fetch() upstream → retry w/ backoff
-    → response translation → SSE stream or JSON
-```
+- **git স্পর্শ করে এমন প্রতিটি সাবএজেন্টের প্রম্পটে `git stash` নিষেধাজ্ঞাটি হুবহু পুনরাবৃত্তি করুন**
+  (Agent টুল / Workflow স্ক্রিপ্ট) — সাবএজেন্টগুলো এই ফাইল উত্তরাধিকারসূত্রে পায় না, এবং stash-সংক্রান্ত ঘটনার নথিভুক্ত
+  পুনরাবৃত্তি একটি সাবএজেন্টের মাধ্যমেই ঘটেছিল।
+- _এই সেশনে_ আপনি তৈরি করেননি এমন কোনো PR মার্জ বা পুশ করার আগে `git worktree list`
+  চালান এবং `gh pr view <N> --json state,headRefOid` পুনরায় পরীক্ষা করুন (কঠোর নিয়ম #22b)।
+- প্রতিটি সেশন শেষে মূল checkout-কে যে ব্রাঞ্চে শুরু হয়েছিল, সেই ব্রাঞ্চেই রাখুন।
 
----
+## Superpowers / পরিকল্পনা আর্টিফ্যাক্ট — পাথ ওভাররাইড
 
-## Key Conventions
+`_tasks/` কনভেনশনটি `AGENTS.md` → "Planning & Research Artifacts"-এ সংজ্ঞায়িত। Superpowers
+স্কিলগুলো এমন ডিফল্টসহ আসে যা `docs/…`-এর দিকে নির্দেশ করে — সেই ডিফল্টগুলো এখানে **ওভাররাইড করা হয়েছে**।
+কোনো Superpowers স্কিল যখন "saved to `docs/superpowers/plans/…`"-এর মতো একটি পাথ ঘোষণা করে,
+লেখার আগে সেটিকে `_tasks/…`-এর সমতুল্য পাথে পুনর্লিখুন:
 
-### Code Style
+| আর্টিফ্যাক্ট (স্কিল)             | ডিফল্ট (ব্যবহার করবেন না) | পরিবর্তে এখানে সংরক্ষণ করুন                                   |
+| -------------------------------- | ------------------------- | ------------------------------------------------------------- |
+| পরিকল্পনা (`writing-plans`)      | `docs/superpowers/plans/` | `_tasks/superpowers/plans/YYYY-MM-DD-<feature>.md`            |
+| স্পেক / ডিজাইন (`brainstorming`) | `docs/superpowers/specs/` | `_tasks/superpowers/specs/YYYY-MM-DD-<topic>-design.md`       |
+| গবেষণা (`deep-research`, ad-hoc) | `docs/research/`          | `_tasks/research/…`                                           |
+| হ্যান্ড-অফ (`/handoff`)          | —                         | `_tasks/hands-off/<YYYY-MM-DD>_<branch>_v<versão>_sess-<id>/` |
 
-- **2 spaces**, semicolons, double quotes, 100 char width, es5 trailing commas
-- **Imports**: external → internal (`@/`, `@omniroute/open-sse`) → relative
-- **Naming**: files=camelCase/kebab, components=PascalCase, constants=UPPER_SNAKE
+মূল রিপোজিটরিতে কখনোই নয়, ওই আর্টিফ্যাক্টগুলো `_tasks/` রিপোজিটরির ভেতরে কমিট করুন (`git -C _tasks …`)।
 
-### Database Access
+## স্ক্র্যাচ / অস্থায়ী ফাইল — `/tmp` নয়, `_artifacts/` ব্যবহার করুন
 
-- **Always** go through `src/lib/db/` domain modules
-- **Never** write raw SQL in routes or handlers
-- **Never** add logic to `src/lib/localDb.ts` (re-export layer only)
-- **Never** barrel-import from `localDb.ts` — import specific `db/` modules
-- DB singleton: `getDbInstance()` from `src/lib/db/core.ts` (WAL journaling)
-- Migrations: `src/lib/db/migrations/` — 21 versioned SQL files
+এই প্রকল্প হারনেসের ডিফল্ট সেশন স্ক্র্যাচপ্যাড (`/tmp/claude-*/…`) ওভাররাইড করে। অস্থায়ী/কাজের
+ফাইল — এক্সপোর্ট, জেনারেট করা zip, একবারের জন্য তৈরি মধ্যবর্তী আউটপুট, সাধারণত `/tmp`-এ রাখতেন এমন যেকোনো কিছু —
+পরিবর্তে `/home/diegosouzapw/dev/proxys/OmniRoute/_artifacts/`-এ লিখুন।
 
-### Error Handling
+- `_artifacts/` হলো একটি রুট `_*` পাথ: এটি ইতিমধ্যেই gitignore করা (`AGENTS.md` → "Root `_*` paths"), শুধু
+  ডিস্কে থাকে, কখনো ট্র্যাক করা হয় না।
+- কারণ: স্ক্র্যাচ আউটপুট প্রকল্পের ভেতরে রাখলে (`/tmp`-এর পরিবর্তে) অপারেটরের পক্ষে
+  অস্থায়ী সবকিছু এক জায়গায় খুঁজে মুছে ফেলা সহজ হয়; তা না হলে অদৃশ্য হয়ে যাওয়া বা আনট্র্যাকড অবস্থায় জমতে থাকা
+  ক্ষণস্থায়ী সেশন-নির্দিষ্ট `/tmp` ডিরেক্টরিগুলোতে খুঁজতে হয়।
+- এটিকে `_tasks/`-এর সঙ্গে **গুলিয়ে ফেলবেন না** (কঠোর নিয়ম #23, দীর্ঘস্থায়ী
+  পরিকল্পনা/স্পেক/গবেষণা/হ্যান্ড-অফের জন্য এর নিজস্ব ব্যক্তিগত git রিপোজিটরি রয়েছে) — `_artifacts/` শুধু ফেলে দেওয়ার উপযোগী কাজের ফাইলের জন্য;
+  এখানে কোনো কিছুরই টিকে থাকা বা সংস্করণায়িত হওয়ার প্রয়োজন নেই।
 
-- try/catch with specific error types, log with pino context
-- Never swallow errors in SSE streams — use abort signals
-- Return proper HTTP status codes (4xx/5xx)
+## PR খোলার আগে বেস সবুজ থাকা
 
-### Seguridad
-
-- **Never** commit secrets/credentials
-- **Never** use `eval()`, `new Function()`, or implied eval
-- Validate all inputs with Zod schemas
-- Encrypt credentials at rest (AES-256-GCM)
-
----
-
-## Common Modification Scenarios
-
-### Adding a New Provider
-
-1. Register in `src/shared/constants/providers.ts` (Zod-validated at load)
-2. Add executor in `open-sse/executors/` if custom logic needed
-3. Add translator in `open-sse/translator/` if non-OpenAI format
-4. Add OAuth config in `src/lib/oauth/constants/oauth.ts` if OAuth-based
-5. Register models in `open-sse/config/providerRegistry.ts`
-6. Write tests in `tests/unit/` (registration, translation, error handling)
-
-### Adding a New API Route
-
-1. Create directory under `src/app/api/v1/your-route/`
-2. Create `route.ts` with `GET`/`POST` handlers
-3. Follow pattern: CORS → Zod body validation → optional auth → handler delegation
-4. Handler goes in `open-sse/handlers/` (import from there, not inline)
-5. Add tests
-
-### Adding a New DB Module
-
-1. Create `src/lib/db/yourModule.ts`
-2. Import `getDbInstance` from `./core.ts`
-3. Export CRUD functions for your domain table(s)
-4. Add migration in `src/lib/db/migrations/` if new tables needed
-5. Re-export from `src/lib/localDb.ts` (add to the re-export list only)
-6. Write tests
-
-### Adding a New MCP Tool
-
-1. Add tool definition in `open-sse/mcp-server/tools/`
-2. Define Zod input schema + async handler
-3. Register in tool set (wired by `createMcpServer()`)
-4. Assign to appropriate scope(s)
-5. Write tests (tool invocation logged to `mcp_audit` table)
-
-### Adding a New A2A Skill
-
-1. Create skill in `src/lib/a2a/skills/`
-2. Skill receives task context (messages, metadata) → returns structured result
-3. Register in the DB-backed skill registry
-4. Write tests
-
----
-
-## Testing Cheat Sheet
-
-| What                    | Command                                                 |
-| ----------------------- | ------------------------------------------------------- |
-| All tests               | `npm run test:all`                                      |
-| Unit tests              | `npm run test:unit`                                     |
-| Single file             | `node --import tsx/esm --test tests/unit/file.test.mjs` |
-| Vitest (MCP, autoCombo) | `npm run test:vitest`                                   |
-| E2E (Playwright)        | `npm run test:e2e`                                      |
-| Protocol E2E (MCP+A2A)  | `npm run test:protocols:e2e`                            |
-| Ecosystem               | `npm run test:ecosystem`                                |
-| Coverage gate           | `npm run test:coverage` (60% min all metrics)           |
-| Coverage report         | `npm run coverage:report`                               |
-
-**PR rule**: If you change production code in `src/`, `open-sse/`, `electron/`, or `bin/`,
-you must include or update tests in the same PR.
-
-**Test layer preference**: unit first → integration (multi-module or DB state) → e2e (UI/workflow only). Encode bug reproductions as automated tests before or alongside the fix.
-
----
-
-## Git Workflow
-
-```bash
-# Never commit directly to main
-git checkout -b feat/your-feature
-# ... make changes ...
-git commit -m "feat: describe your change"
-git push -u origin feat/your-feature
-```
-
-**Branch prefixes**: `feat/`, `fix/`, `refactor/`, `docs/`, `test/`, `chore/`
-
-**Commit format** ([Conventional Commits](https://www.conventionalcommits.org/)):
-
-```
-feat: add circuit breaker for provider calls
-fix: resolve JWT secret validation edge case
-docs: update AGENTS.md with pipeline internals
-test: add MCP tool unit tests
-refactor(db): consolidate rate limit tables
-```
-
-**Scopes**: `db`, `sse`, `oauth`, `dashboard`, `api`, `cli`, `docker`, `ci`, `mcp`, `a2a`,
-`memory`, `skills`.
-
----
-
-## Environment
-
-- **Runtime**: Node.js ≥18 <24, ES Modules
-- **TypeScript**: 5.9, target ES2022, module esnext, resolution bundler
-- **Path aliases**: `@/*` → `src/`, `@omniroute/open-sse` → `open-sse/`
-- **Default port**: 20128 (API + dashboard on same port)
-- **Data directory**: `DATA_DIR` env var, defaults to `~/.omniroute/`
-- **Key env vars**: `PORT`, `JWT_SECRET`, `INITIAL_PASSWORD`, `REQUIRE_API_KEY`, `APP_LOG_LEVEL`
-
----
-
-## Hard Rules (Never Violate)
-
-1. Never commit secrets or credentials
-2. Never add logic to `localDb.ts`
-3. Never use `eval()` / `new Function()` / implied eval
-4. Never commit directly to `main`
-5. Never write raw SQL in routes — use `src/lib/db/` modules
-6. Never silently swallow errors in SSE streams
-7. Always validate inputs with Zod schemas
-8. Always include tests when changing production code
-9. Coverage must stay ≥60% (statements, lines, functions, branches)
+কোনো ব্রাঞ্চ কাটার বা PR খোলার আগে বেস-গ্রিন পরীক্ষা চালান (`AGENTS.md` → Git Workflow →
+"Base-green check"; প্রকল্পের স্কিলগুলো এটিকে `.agents/skills/_shared/base-green.md` হিসেবে উল্লেখ করে)। বেস টিপ লাল থাকা অবস্থায়
+খোলা PR-এর বডিতে অবশ্যই `⚠️ base-red inherited: #<issue>` থাকতে হবে। জমে থাকা লাল অবস্থা
+(বেস টিপ + লাল PRগুলো) নিষ্পত্তি করতে `/sweep-reds` স্কিল ব্যবহার করুন।

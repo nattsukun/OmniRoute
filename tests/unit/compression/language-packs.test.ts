@@ -9,10 +9,10 @@ import {
 import { applyRulesToText } from "../../../open-sse/services/compression/caveman.ts";
 import { getRulesForContext } from "../../../open-sse/services/compression/cavemanRules.ts";
 
-const LANGUAGES = ["pt-BR", "es", "de", "fr", "ja"];
+const LANGUAGES = ["pt-BR", "es", "de", "fr", "ja", "id", "hu"];
 
 describe("Caveman language packs", () => {
-  it("ships 5 language packs with at least 15 rules each", () => {
+  it("ships 7 language packs with at least 15 rules each", () => {
     for (const language of LANGUAGES) {
       const rules = loadAllRulesForLanguage(language, { refresh: true });
       assert.ok(rules.length >= 15, `${language} expected 15+ rules, got ${rules.length}`);
@@ -37,6 +37,8 @@ describe("Caveman language packs", () => {
     assert.equal(detectCompressionLanguage("ich brauche diese konfiguration"), "de");
     assert.equal(detectCompressionLanguage("j'ai besoin de corriger cette erreur fichier"), "fr");
     assert.equal(detectCompressionLanguage("このコードを修正してください"), "ja");
+    assert.equal(detectCompressionLanguage("bisa tolong jelaskan tentang database ini"), "id");
+    assert.equal(detectCompressionLanguage("kérlek javítsd ezt a hibát a kódban"), "hu");
   });
 
   it("applies non-English rule packs to golden samples", () => {
@@ -48,6 +50,65 @@ describe("Caveman language packs", () => {
     assert.ok(text.includes("auth"));
   });
 
+  it("keeps the Spanish pack aligned with English rule categories", () => {
+    const esRules = loadAllRulesForLanguage("es", { refresh: true });
+    assert.ok(esRules.length >= 40, `es expected 40+ rules, got ${esRules.length}`);
+    assert.ok(
+      esRules.some((rule) => rule.category === "dedup"),
+      "es missing dedup"
+    );
+    assert.ok(
+      esRules.some((rule) => rule.category === "ultra"),
+      "es missing ultra"
+    );
+    assert.ok(
+      esRules.some((rule) => rule.category === "terse"),
+      "es missing terse"
+    );
+  });
+
+  it("applies expanded Spanish rules without touching technical terms", () => {
+    const esRules = getRulesForContext("user", "ultra", "es");
+    const { text } = applyRulesToText(
+      "Por favor proporciona una explicación detallada de la base de datos y autenticación en src/auth.ts",
+      esRules
+    );
+
+    assert.ok(!text.toLowerCase().includes("por favor"));
+    assert.ok(!text.toLowerCase().includes("explicación detallada"));
+    assert.ok(text.includes("BD"));
+    assert.ok(text.includes("auth"));
+    assert.ok(text.includes("src/auth.ts"));
+  });
+
+  it("applies Indonesian rules without touching technical terms", () => {
+    const idRules = getRulesForContext("user", "ultra", "id");
+    const { text } = applyRulesToText(
+      "Tolong berikan penjelasan detail tentang basis data dan autentikasi di src/auth.ts",
+      idRules
+    );
+
+    assert.ok(!text.toLowerCase().includes("tolong"));
+    assert.ok(!text.toLowerCase().includes("penjelasan detail"));
+    assert.ok(text.includes("DB"));
+    assert.ok(text.includes("auth"));
+    assert.ok(text.includes("src/auth.ts"));
+  });
+
+  it("applies Hungarian rules without touching technical terms", () => {
+    const huRules = getRulesForContext("user", "ultra", "hu");
+    const { text } = applyRulesToText(
+      "Kérlek, adj részletes magyarázatot az adatbázis és a hitelesítés hibájáról a src/auth.ts fájlban.",
+      huRules
+    );
+
+    assert.ok(!text.toLowerCase().includes("kérlek"));
+    assert.ok(!text.toLowerCase().includes("részletes magyarázatot"));
+    assert.ok(text.includes("DB"));
+    assert.ok(text.includes("auth"));
+    assert.ok(text.includes("src/auth.ts"));
+  });
+
   it("builds localized output mode instructions", () => {
     const config = { enabled: true, intensity: "full" as const, autoClarity: true };
 
@@ -56,5 +117,7 @@ describe("Caveman language packs", () => {
     assert.match(buildCavemanOutputInstruction(config, "de"), /Antworte/);
     assert.match(buildCavemanOutputInstruction(config, "fr"), /Reponds/);
     assert.match(buildCavemanOutputInstruction(config, "ja"), /回答/);
+    assert.match(buildCavemanOutputInstruction(config, "id"), /Jawab/);
+    assert.match(buildCavemanOutputInstruction(config, "hu"), /Válaszolj/);
   });
 });

@@ -1,6 +1,7 @@
 import { AI_PROVIDERS } from "@/shared/constants/providers";
 import { getUnifiedModelsResponse } from "@/app/api/v1/models/catalog";
 import { INTERNAL_PROXY_ERROR, getCatalogDiagnosticsHeaders } from "@/lib/modelMetadataRegistry";
+import { sanitizeErrorMessage } from "@omniroute/open-sse/utils/error";
 
 /**
  * GET /api/models/catalog
@@ -11,13 +12,18 @@ export async function GET(request: Request) {
   try {
     const response = await getUnifiedModelsResponse(request, {});
     const body = await response.json();
+    // The body is regrouped below, so forward only retry/status metadata, not
+    // representation headers such as Content-Length or ETag from the core body.
+    const headers = new Headers(diagnosticHeaders);
+    for (const name of ["Retry-After", "x-omniroute-catalog"]) {
+      const value = response.headers.get(name);
+      if (value !== null) headers.set(name, value);
+    }
 
     if (!response.ok) {
       return Response.json(body, {
         status: response.status,
-        headers: {
-          ...diagnosticHeaders,
-        },
+        headers,
       });
     }
 
@@ -37,7 +43,9 @@ export async function GET(request: Request) {
         id: model.id,
         name: model.name || model.root || model.id,
         type: model.type || "chat",
+        ...(typeof model.subtype === "string" ? { subtype: model.subtype } : {}),
         custom: model.custom === true,
+        ...(model.free === true ? { free: true } : {}),
         ...(model.capabilities ? { capabilities: model.capabilities } : {}),
         ...(typeof model.context_length === "number"
           ? { context_length: model.context_length }
@@ -61,17 +69,13 @@ export async function GET(request: Request) {
 
     return Response.json(
       { catalog, catalogVersion: response.headers.get("X-Model-Catalog-Version") },
-      {
-        headers: {
-          ...diagnosticHeaders,
-        },
-      }
+      { headers }
     );
   } catch (error) {
     return Response.json(
       {
         error: {
-          message: (error as any).message,
+          message: sanitizeErrorMessage(error instanceof Error ? error.message : String(error)),
           type: "server_error",
           code: INTERNAL_PROXY_ERROR,
         },

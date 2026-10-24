@@ -2,7 +2,14 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useTranslations } from "next-intl";
+import { SegmentedControl } from "@/shared/components";
 import CompressionSettingsTab from "@/app/(dashboard)/dashboard/settings/components/CompressionSettingsTab";
+import { outputStyleLanguages } from "../../../../../../open-sse/services/compression/outputStyles/catalog.ts";
+import {
+  buildOutputStylesInstruction,
+  resolveOutputStyleLanguage,
+} from "../../../../../../open-sse/services/compression/outputStyles/apply.ts";
+import { resolveOutputStyleSelection } from "../../../../../../open-sse/services/compression/outputStyles/backCompat.ts";
 
 type AnalyticsSummary = {
   totalRequests: number;
@@ -27,9 +34,22 @@ type OutputModeConfig = {
   autoClarity: boolean;
 };
 
+type InputModeConfig = {
+  enabled: boolean;
+  intensity: "lite" | "full" | "ultra";
+};
+
 type CompressionSettings = {
+  enabled?: boolean;
   languageConfig?: LanguageConfig;
   cavemanOutputMode?: OutputModeConfig;
+  cavemanConfig?: InputModeConfig & Record<string, unknown>;
+};
+
+// What a save sends. The store merges a partial cavemanOutputMode into its row.
+type SettingsPatch = {
+  languageConfig?: LanguageConfig;
+  cavemanOutputMode?: Partial<OutputModeConfig>;
 };
 
 type LanguagePack = { language: string; ruleCount: number; categories?: string[] };
@@ -44,6 +64,7 @@ export default function CavemanContextPageClient() {
   const [settings, setSettings] = useState<CompressionSettings | null>(null);
   const [languagePacks, setLanguagePacks] = useState<LanguagePack[]>([]);
   const [saving, setSaving] = useState(false);
+  const [viewMode, setViewMode] = useState<"simple" | "advanced">("simple");
 
   const refreshSettings = () => {
     fetch("/api/context/caveman/config")
@@ -72,17 +93,34 @@ export default function CavemanContextPageClient() {
   };
   const outputMode: OutputModeConfig = settings?.cavemanOutputMode ?? {
     enabled: false,
-    intensity: "full",
+    intensity: "lite",
     autoClarity: true,
   };
+  const masterEnabled = settings?.enabled ?? false;
 
-  const saveSettings = async (patch: Partial<CompressionSettings>) => {
+  // A save sends the keys it names. The store merges a partial cavemanOutputMode into its row
+  // but replaces languageConfig whole, so a language save is built from the server's current
+  // row, not this page's copy, and a change saved elsewhere since the page loaded is not
+  // written back. A built save with no row sends nothing.
+  const saveSettings = async (
+    patch: SettingsPatch | ((current: CompressionSettings) => SettingsPatch)
+  ) => {
     setSaving(true);
     try {
+      let body: SettingsPatch;
+      if (typeof patch === "function") {
+        const current: CompressionSettings | null = await fetch("/api/context/caveman/config")
+          .then((res) => (res.ok ? res.json() : null))
+          .catch(() => null);
+        if (!current) return;
+        body = patch(current);
+      } else {
+        body = patch;
+      }
       const res = await fetch("/api/context/caveman/config", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(patch),
+        body: JSON.stringify(body),
       });
       if (res.ok) setSettings(await res.json());
     } finally {
@@ -91,18 +129,21 @@ export default function CavemanContextPageClient() {
   };
 
   const updateLanguageConfig = (patch: Partial<LanguageConfig>) => {
-    saveSettings({ languageConfig: { ...languageConfig, ...patch } });
+    saveSettings((current) => ({ languageConfig: { ...current.languageConfig, ...patch } }));
   };
 
   const updateOutputMode = (patch: Partial<OutputModeConfig>) => {
-    saveSettings({ cavemanOutputMode: { ...outputMode, ...patch } });
+    saveSettings({ cavemanOutputMode: patch });
   };
 
   const togglePack = (language: string, enabled: boolean) => {
-    const enabledPacks = enabled
-      ? [...new Set([...languageConfig.enabledPacks, language])]
-      : languageConfig.enabledPacks.filter((pack) => pack !== language && pack !== "en");
-    updateLanguageConfig({ enabledPacks });
+    saveSettings((current) => {
+      const packs = current.languageConfig?.enabledPacks ?? [];
+      const enabledPacks = enabled
+        ? [...new Set([...packs, language])]
+        : packs.filter((pack) => pack !== language);
+      return { languageConfig: { ...current.languageConfig, enabledPacks } };
+    });
   };
 
   const cavemanStats = analytics?.byEngine?.caveman ?? analytics?.byEngine?.standard;
@@ -113,17 +154,38 @@ export default function CavemanContextPageClient() {
     [t("savingsPercent"), `${cavemanStats?.avgSavingsPct ?? analytics?.avgSavingsPct ?? 0}%`],
     [t("avgLatency"), `${analytics?.avgDurationMs ?? 0}ms`],
   ];
-  const previewPrompt = `[OmniRoute Caveman Output Mode]\n${t(`preview.${outputMode.intensity}`)}`;
+  // The block requests carry while output mode is on, built by the injector itself.
+  // An empty body gives auto-detect nothing to read, so it shows the fallback language.
+  const previewPrompt = buildOutputStylesInstruction(
+    resolveOutputStyleSelection({ cavemanOutputMode: { ...outputMode, enabled: true } }),
+    resolveOutputStyleLanguage(languageConfig, {})
+  );
+
+  // Rule packs drive the input engines; output styles can instruct in more
+  // languages (e.g. vi has no pack). The default-language selector offers both.
+  const languageOptions = [
+    ...new Set([...languagePacks.map((pack) => pack.language), ...outputStyleLanguages()]),
+  ].sort();
 
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-6">
       <header className="flex flex-col gap-2">
-        <div className="flex items-center gap-3">
-          <span className="material-symbols-outlined text-[30px] text-primary">compress</span>
-          <div>
-            <h1 className="text-2xl font-bold text-text-main">{t("title")}</h1>
-            <p className="text-sm text-text-muted">{t("description")}</p>
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <span className="material-symbols-outlined text-[30px] text-primary">compress</span>
+            <div>
+              <h1 className="text-2xl font-bold text-text-main">{t("title")}</h1>
+              <p className="text-sm text-text-muted">{t("description")}</p>
+            </div>
           </div>
+          <SegmentedControl
+            value={viewMode}
+            onChange={(v) => setViewMode(v as "simple" | "advanced")}
+            options={[
+              { value: "simple", label: t("simpleMode") || "Simple" },
+              { value: "advanced", label: t("advancedMode") || "Advanced" },
+            ]}
+          />
         </div>
       </header>
 
@@ -166,9 +228,9 @@ export default function CavemanContextPageClient() {
             onChange={(event) => updateLanguageConfig({ defaultLanguage: event.target.value })}
             className="rounded-lg border border-border bg-bg px-3 py-2 text-sm"
           >
-            {languagePacks.map((pack) => (
-              <option key={pack.language} value={pack.language}>
-                {pack.language}
+            {languageOptions.map((lang) => (
+              <option key={lang} value={lang}>
+                {lang}
               </option>
             ))}
           </select>
@@ -193,6 +255,13 @@ export default function CavemanContextPageClient() {
         </div>
       </section>
 
+      {!masterEnabled && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-700 dark:text-amber-300 flex items-start gap-2">
+          <span className="material-symbols-outlined text-[18px]">info</span>
+          <p>{t("masterDisabledWarning")}</p>
+        </div>
+      )}
+
       <section className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <div className="rounded-lg border border-border bg-surface p-4">
           <h2 className="text-sm font-semibold text-text-main">{t("analyticsTitle")}</h2>
@@ -215,16 +284,9 @@ export default function CavemanContextPageClient() {
         <div className="rounded-lg border border-border bg-surface p-4">
           <h2 className="text-sm font-semibold text-text-main">{t("outputModeTitle")}</h2>
           <p className="mt-1 text-xs text-text-muted">{t("outputModeDesc")}</p>
+          {/* On/off + intensity for caveman output mode live in the panel
+              (/dashboard/context/settings). This page keeps the detailed knobs only. */}
           <div className="mt-3 flex flex-wrap gap-4 text-sm text-text-main">
-            <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={outputMode.enabled}
-                disabled={saving}
-                onChange={(event) => updateOutputMode({ enabled: event.target.checked })}
-              />
-              {t("enabled")}
-            </label>
             <label className="flex items-center gap-2">
               <input
                 type="checkbox"
@@ -234,18 +296,6 @@ export default function CavemanContextPageClient() {
               />
               {t("autoClarity")}
             </label>
-            <select
-              value={outputMode.intensity}
-              disabled={saving}
-              onChange={(event) =>
-                updateOutputMode({ intensity: event.target.value as OutputModeConfig["intensity"] })
-              }
-              className="rounded-lg border border-border bg-bg px-3 py-2 text-sm"
-            >
-              <option value="lite">lite</option>
-              <option value="full">full</option>
-              <option value="ultra">ultra</option>
-            </select>
           </div>
           <pre className="mt-3 overflow-auto rounded-lg border border-border bg-bg p-3 text-xs text-text-main">
             {previewPrompt}
@@ -256,7 +306,7 @@ export default function CavemanContextPageClient() {
         </div>
       </section>
 
-      <CompressionSettingsTab />
+      {viewMode === "advanced" && <CompressionSettingsTab />}
     </div>
   );
 }

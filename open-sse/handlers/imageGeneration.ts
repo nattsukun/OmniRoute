@@ -1,35 +1,178 @@
 import { randomUUID } from "crypto";
-/**
- * Image Generation Handler
- *
- * Handles POST /v1/images/generations requests.
- * Proxies to upstream image generation providers using OpenAI-compatible format.
- *
- * Request format (OpenAI-compatible):
- * {
- *   "model": "openai/dall-e-3",
- *   "prompt": "a beautiful sunset over mountains",
- *   "n": 1,
- *   "size": "1024x1024",
- *   "quality": "standard",       // optional: "standard" | "hd"
- *   "response_format": "url"     // optional: "url" | "b64_json"
- * }
- */
+/** Image generation handler for POST /v1/images/generations (OpenAI-compatible). */
+
+import {
+  CHATGPT_WEB_RETIRED_ERROR_CODE,
+  CHATGPT_WEB_RETIRED_MESSAGE,
+  isCommonChatGptWebRetiredProviderId,
+} from "@/shared/constants/chatgptWebRetirement";
+import {
+  isMicrosoftDesignerWebRetiredProviderId,
+  MICROSOFT_DESIGNER_WEB_RETIRED_MESSAGE,
+} from "@/shared/constants/designerWebRetirement";
 
 import { getImageProvider, parseImageModel } from "../config/imageRegistry.ts";
+import { HTTP_STATUS } from "../config/constants.ts";
+import { applyAntigravityClientProfileHeaders } from "../services/antigravityClientProfile.ts";
+import { getAntigravityEnvelopeUserAgent } from "../services/antigravityIdentity.ts";
+import { kieExecutor } from "../executors/kie.ts";
 import { mapImageSize } from "../translator/image/sizeMapper.ts";
 import { getCodexClientVersion, getCodexUserAgent } from "../config/codexClient.ts";
-import { ChatGptWebExecutor } from "../executors/chatgpt-web.ts";
-import { getChatGptImage, findChatGptImageBySha256 } from "../services/chatgptImageCache.ts";
-import { createHash } from "node:crypto";
+import { isCodexFreePlan } from "../executors/codex/tools.ts";
 import { saveCallLog } from "@/lib/usageDb";
+import { sleep } from "../utils/sleep.ts";
+import { normalizeImageBuffer } from "../utils/imageNormalize.ts";
+import {
+  getKieErrorMessage,
+  getKieErrorStatus,
+  getKieTaskId,
+  isJsonObject,
+  parseKieResultJson,
+} from "../utils/kieTask.ts";
 import {
   submitComfyWorkflow,
   pollComfyResult,
   fetchComfyOutput,
   extractComfyOutputFiles,
+  resolveComfyUiBaseUrl,
 } from "../utils/comfyuiClient.ts";
-import { fetchRemoteImage } from "@/shared/network/remoteImageFetch";
+import { fetchUntrustedRemoteImage } from "@/shared/network/remoteImageFetch";
+import {
+  FetchTimeoutError,
+  fetchWithTimeout,
+  getConfiguredTimeout,
+} from "@/shared/utils/fetchTimeout";
+import { sanitizeErrorMessage, sanitizeUpstreamDetails } from "../utils/error.ts";
+// Shared with imageUpscale/shared.ts — see imageErrorLog.ts for why a bare
+// String(value) is unsafe here (null-prototype sanitizeUpstreamDetails() payloads, #12506).
+import { stringifyImageErrorForLog } from "./imageErrorLog.ts";
+
+import { handleSDWebUIImageGeneration } from "./imageGeneration/providers/sdWebUI.ts";
+import { handleHyperbolicImageGeneration } from "./imageGeneration/providers/hyperbolic.ts";
+import { handleHuggingFaceImageGeneration } from "./imageGeneration/providers/huggingface.ts";
+import { handleComfyUIImageGeneration } from "./imageGeneration/providers/comfyUI.ts";
+import { handleImagen3ImageGeneration } from "./imageGeneration/providers/imagen3.ts";
+import { handleIdeogramImageGeneration } from "./imageGeneration/providers/ideogram.ts";
+import { handleHaiperImageGeneration } from "./imageGeneration/providers/haiper.ts";
+import { handleLeonardoImageGeneration } from "./imageGeneration/providers/leonardo.ts";
+import { handleMagnificImageGeneration } from "./imageGeneration/providers/magnific.ts";
+import { handleNvidiaNimImageGeneration } from "./imageGeneration/providers/nvidiaNim.ts";
+import { handleSegmindImageGeneration } from "./imageGeneration/providers/segmind.ts";
+import { handleUcImageGeneration } from "./imageGeneration/providers/ucImage.ts";
+import { handleCursorAgentImageGeneration } from "./imageGeneration/providers/cursorAgentImage.ts";
+import { handleMinimaxImageGeneration } from "./imageGeneration/providers/minimax.ts";
+import { handleCloudflareAiImageGeneration } from "./imageGeneration/providers/cloudflareAi.ts";
+import { buildXaiImageRequest } from "./imageGeneration/providers/xaiImage.ts";
+import { handleMaxaiImageGeneration } from "./imageGeneration/providers/maxaiImage.ts";
+import { handleAdobeFireflyImageGeneration } from "./imageGeneration/providers/adobeFirefly.ts";
+import { handleSyntxImageGeneration } from "./imageGeneration/providers/syntx.ts";
+import { geminiInlineImagePart } from "./imageGeneration/providers/geminiInline.ts";
+import { handleAlibabaImageGeneration } from "./imageGeneration/providers/alibabaImage.ts";
+import { handleAiHordeImageGeneration } from "./imageGeneration/providers/aihorde.ts";
+import * as codexImages from "./imageGeneration/providers/codexImages.ts";
+import { handleZenmuxImageGeneration } from "./imageGeneration/providers/zenmux.ts";
+import { handleMuseImageGeneration } from "./imageGeneration/providers/museImage.ts";
+import { handleGeminiAiImageGeneration } from "./imageGeneration/providers/geminiAiStudio.ts";
+import { handleBlackForestLabsImageGeneration } from "./imageGeneration/providers/blackForestLabs.ts";
+import {
+  fanOutSingleImageCalls,
+  IMAGE_FANOUT_MAX_N,
+  resolveRequestedImageCount,
+  SINGLE_IMAGE_FANOUT_FORMATS,
+} from "./imageGeneration/fanOut.ts";
+import {
+  applyPollinationsAnonymousFallback,
+  reportPollinationsAnonOutcome,
+} from "./imageGeneration/pollinationsAnonAuth.ts";
+import { fetchImageEndpoint } from "./imageGeneration/openAiImageFetch.ts";
+
+// Re-export so /v1/images/edits can dispatch Firefly reference-image edits.
+export { handleAdobeFireflyImageGeneration };
+export { handleSyntxImageGeneration };
+export { isCodexChatGptModelAccessError };
+
+interface KieImageOptions {
+  model: string;
+  provider: string;
+  providerConfig: {
+    baseUrl: string;
+    statusUrl?: string;
+  };
+  body: Record<string, unknown> & {
+    prompt?: unknown;
+    size?: unknown;
+    n?: unknown;
+    timeout_ms?: unknown;
+    poll_interval_ms?: unknown;
+  };
+  credentials?: {
+    apiKey?: string;
+    accessToken?: string;
+  } | null;
+  log?: {
+    info: (scope: string, message: string) => void;
+    error: (scope: string, message: string) => void;
+  } | null;
+}
+
+// KIE Market catalog ids are namespaced for OmniRoute's catalog
+// (`<vendor>/<model>`), but the KIE Market createTask API expects
+// vendor-specific upstream ids that do not follow a single consistent
+// pattern. Every entry below was confirmed individually against the literal
+// example request JSON published on docs.kie.ai (never inferred by pattern —
+// see #11326's false "everything else already matches" claim and #11296's
+// follow-up correction):
+//   - google-imagen: nano-banana-2 and nano-banana-pro drop the vendor
+//     namespace entirely; nano-banana and nano-banana-edit use a `google/`
+//     prefix instead of `google-imagen/` (docs.kie.ai/market/google/*).
+//   - gpt: gpt-image-2-* drops the `gpt/` namespace entirely
+//     (docs.kie.ai/market/gpt/gpt-image-2-*); gpt-image-1.5-* uses a
+//     `gpt-image/` namespace instead of `gpt/gpt-image-1.5-`, and keeps the
+//     dot in "1.5" (docs.kie.ai/market/gpt-image/1-5-*).
+//   - seedream: 5.0-lite-* drops the ".0" — real id is `5-lite-*`
+//     (docs.kie.ai/market/seedream/5-lite-text-to-image); seedream 4.5 (T2I
+//     and edit) already matches byte-for-byte.
+//   - flux: `flux/2-*` uses a `flux-2/` namespace (dash, not slash); the
+//     generic (non-"pro") variant is named `flex` upstream, not `2`
+//     (docs.kie.ai/market/flux2/pro-*, .../flex-*).
+//   - wan: `wan/2.7-*` keeps the dot in our catalog, but KIE's documented
+//     enum uses a dash — real id is `wan/2-7-*`
+//     (docs.kie.ai/market/wan/2-7-image[-pro]).
+//   - ideogram (v3-text-to-image, v3-edit, v3-remix), qwen, qwen2, and
+//     grok-imagine already match byte-for-byte
+//     (docs.kie.ai/market/{ideogram,qwen,qwen2,grok-imagine}/*).
+//     ideogram/v3-reframe has no dedicated docs.kie.ai page as of this sweep
+//     (its 3 siblings above are all direct id matches, so it is assumed
+//     correct by pattern, not independently confirmed).
+// #14335 (2026-10-08): https://docs.kie.ai/market/z-image/z-image declares
+// `z-image`. The old versioned picker ids remain compatibility aliases only.
+// Flux Kontext's dedicated API/tier is now explicit in the registry. The current
+// main docs also offer a Market API, but existing requests retain the documented
+// /old-model/flux-kontext-api contract rather than migrating endpoints implicitly.
+export const KIE_MARKET_UPSTREAM_MODEL_IDS: ReadonlyMap<string, string> = new Map([
+  ["google-imagen/nano-banana", "google/nano-banana"],
+  ["google-imagen/nano-banana-2", "nano-banana-2"],
+  ["google-imagen/nano-banana-pro", "nano-banana-pro"],
+  ["google-imagen/nano-banana-edit", "google/nano-banana-edit"],
+  ["gpt/gpt-image-2-text-to-image", "gpt-image-2-text-to-image"],
+  ["gpt/gpt-image-2-image-to-image", "gpt-image-2-image-to-image"],
+  ["gpt/gpt-image-1.5-text-to-image", "gpt-image/1.5-text-to-image"],
+  ["gpt/gpt-image-1.5-image-to-image", "gpt-image/1.5-image-to-image"],
+  ["seedream/5.0-lite-text-to-image", "seedream/5-lite-text-to-image"],
+  ["seedream/5.0-lite-image-to-image", "seedream/5-lite-image-to-image"],
+  ["flux/2-pro-text-to-image", "flux-2/pro-text-to-image"],
+  ["flux/2-pro-image-to-image", "flux-2/pro-image-to-image"],
+  ["flux/2-text-to-image", "flux-2/flex-text-to-image"],
+  ["flux/2-image-to-image", "flux-2/flex-image-to-image"],
+  ["wan/2.7-image", "wan/2-7-image"],
+  ["wan/2.7-image-pro", "wan/2-7-image-pro"],
+  ["z-image/4.0-text-to-image", "z-image"],
+  ["z-image/4.5-text-to-image", "z-image"],
+]);
+
+export function resolveKieMarketUpstreamModelId(publicModelId: string): string {
+  return KIE_MARKET_UPSTREAM_MODEL_IDS.get(publicModelId) ?? publicModelId;
+}
 
 const OPENAI_IMAGE_TO_IMAGE_MODELS = new Set([
   "black-forest-labs/FLUX.2-max",
@@ -48,29 +191,144 @@ const OPENAI_IMAGE_TO_IMAGE_MODELS = new Set([
   "qwen-image",
 ]);
 
-const BFL_MODEL_ENDPOINTS = {
-  "flux-2-max": "/v1/flux-2-max",
-  "flux-2-pro": "/v1/flux-2-pro",
-  "flux-2-flex": "/v1/flux-2-flex",
-  "flux-2-klein-9b": "/v1/flux-2-klein-9b",
-  "flux-2-klein-4b": "/v1/flux-2-klein-4b",
-  "flux-kontext-pro": "/v1/flux-kontext-pro",
-  "flux-kontext-max": "/v1/flux-kontext-max",
-  "flux-pro-1.1": "/v1/flux-pro-1.1",
-  "flux-pro-1.1-ultra": "/v1/flux-pro-1.1-ultra",
-  "flux-dev": "/v1/flux-dev",
-  "flux-pro": "/v1/flux-pro",
-};
+const IMAGE_ASPECT_RATIO_PATTERN = /^\d+:\d+$/;
+const IMAGE_SIZE_PATTERN = /^(?:1K|2K|4K)$/;
 
-const BFL_EDIT_MODELS = new Set([
-  "flux-2-max",
-  "flux-2-pro",
-  "flux-2-flex",
-  "flux-kontext-pro",
-  "flux-kontext-max",
-]);
+/**
+ * Read the configured node base URL from a custom provider's credentials:
+ * `providerSpecificData.baseUrl` first, then the legacy top-level
+ * `credentials.baseUrl`. Returns null when neither is set, so callers can
+ * fall back to a default or fail closed.
+ */
+function pickConfiguredNodeBaseUrl(
+  credentials:
+    { baseUrl?: unknown; providerSpecificData?: { baseUrl?: unknown } | null } | null | undefined
+): string | null {
+  const psd = credentials?.providerSpecificData;
+  const psdBaseUrl =
+    psd && typeof psd === "object" && typeof psd.baseUrl === "string" && psd.baseUrl.trim()
+      ? psd.baseUrl.trim()
+      : null;
+  if (psdBaseUrl) return psdBaseUrl;
+  return typeof credentials?.baseUrl === "string" && credentials.baseUrl.trim()
+    ? credentials.baseUrl.trim()
+    : null;
+}
 
-const BFL_FAILURE_STATUSES = new Set(["Error", "Failed", "Content Moderated", "Request Moderated"]);
+/**
+ * Resolve the upstream images endpoint for a custom (OpenAI-compatible) image
+ * provider node (#3205).
+ *
+ * Custom provider nodes store their base URL the same way the chat path does:
+ * in `credentials.providerSpecificData.baseUrl` (e.g. `https://example.com/v1`),
+ * NOT as a top-level `credentials.baseUrl`. Older callers may still pass a
+ * top-level `baseUrl`, so we honor that as a secondary source. When neither is
+ * present the caller may use its explicit fallback. Custom-node callers use
+ * failClosed so they never route to a built-in provider endpoint.
+ *
+ * Resolution order: providerSpecificData.baseUrl → credentials.baseUrl → fallback.
+ *
+ * A node base URL like `https://example.com/v1` is normalized and the
+ * OpenAI-compatible `/images/generations` path appended (mirroring
+ * `buildOpenAICompatibleUrl` in services/provider.ts). A node URL that already
+ * ends in `/images/generations` is returned as-is (no double-append). The
+ * `fallback` value is assumed to already be a complete URL and is returned
+ * verbatim.
+ */
+export function resolveImageBaseUrl(
+  credentials:
+    { baseUrl?: unknown; providerSpecificData?: { baseUrl?: unknown } | null } | null | undefined,
+  fallback: string,
+  endpoint: "generations" | "edits" = "generations",
+  failClosed = false
+): string {
+  const nodeBaseUrl = pickConfiguredNodeBaseUrl(credentials);
+
+  if (!nodeBaseUrl) return failClosed ? "" : fallback;
+
+  // A single configured node serves both image routes: honor a base URL that already
+  // points at the requested OpenAI image path, and rewrite one that points at the other
+  // image endpoint (e.g. `.../images/generations` requested for edits) (#3214/#3215).
+  const suffix = `/images/${endpoint}`;
+  // Trim trailing slashes without a backtracking-prone regex (`/\/+$/` is a
+  // polynomial-ReDoS pattern on long runs of "/" — CodeQL js/polynomial-redos).
+  let normalized = nodeBaseUrl;
+  while (normalized.endsWith("/")) normalized = normalized.slice(0, -1);
+  if (normalized.endsWith(suffix)) return normalized;
+  const stripped = normalized.replace(/\/images\/(?:generations|edits)$/, "");
+  return `${stripped}${suffix}`;
+}
+
+function normalizeImageAspectRatio(value: unknown, fallbackSize: unknown): string {
+  if (typeof value === "string") {
+    const trimmedValue = value.trim();
+    if (IMAGE_ASPECT_RATIO_PATTERN.test(trimmedValue)) return trimmedValue;
+  }
+  return mapImageSize(typeof fallbackSize === "string" ? fallbackSize : null);
+}
+
+/**
+ * Normalize the caller's `image_size` for Antigravity's `imageConfig.imageSize`.
+ *
+ * This is the output-resolution axis (`1K` | `2K` | `4K` — the values #11952 observed
+ * Antigravity accepting; not a documented upstream enum), distinct from the `size`/`aspect_ratio`
+ * axis handled by `normalizeImageAspectRatio`. Returns `value: undefined` when the caller sent
+ * nothing usable (absent or non-string), so the key is left out and the upstream default
+ * applies. A string outside that set is clamped to `1K` rather than forwarded because we have
+ * not confirmed what upstream does with an unrecognised value; the clamp is reported through
+ * `clamped: true` so the caller can warn and the call log can record the raw request next to
+ * what was actually sent (omni-code-review LEDGER-6 / LEDGER-48 / LEDGER-57).
+ */
+function normalizeImageGenerationSize(value: unknown): {
+  value: string | undefined;
+  clamped: boolean;
+} {
+  if (typeof value !== "string") return { value: undefined, clamped: false };
+  const normalized = value.trim().toUpperCase();
+  if (IMAGE_SIZE_PATTERN.test(normalized)) return { value: normalized, clamped: false };
+  return { value: "1K", clamped: true };
+}
+
+function parseJsonOrNull(value: string): unknown | null {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+export function sanitizeImageProviderError(errorText: string): unknown {
+  const parsed = parseJsonOrNull(errorText);
+  if (parsed !== null) {
+    return sanitizeUpstreamDetails(parsed) || sanitizeErrorMessage(errorText);
+  }
+  return sanitizeErrorMessage(errorText);
+}
+
+// #8307 — some ChatGPT accounts can run Codex but lack entitlement for the specific
+// requested image model. Upstream signals this as a 400 with an exact, stable message
+// (not a generic "invalid request"). Classify it so the caller can mark the failure
+// `retryable: true`, which routes it through the same sibling-account fallback that
+// already handles 401s (executeImageWithCredentialFallback, src/sse/services/imageCredentialRetry.ts).
+function isCodexChatGptModelAccessError(status: number, errorText: string, model: string): boolean {
+  if (status !== 400) return false;
+  const parsed = parseJsonOrNull(errorText);
+  let detail: string | null = null;
+  if (typeof parsed === "string") {
+    detail = parsed;
+  } else if (parsed && typeof parsed === "object") {
+    const obj = parsed as Record<string, unknown>;
+    if (typeof obj.detail === "string") detail = obj.detail;
+    else if (typeof obj.message === "string") detail = obj.message;
+    else if (obj.error && typeof obj.error === "object") {
+      const nested = (obj.error as Record<string, unknown>).message;
+      if (typeof nested === "string") detail = nested;
+    }
+  }
+  return (
+    detail === `The '${model}' model is not supported when using Codex with a ChatGPT account.`
+  );
+}
 
 const STABILITY_GENERATION_ENDPOINTS = {
   "sd3.5-large": "/v2beta/stable-image/generate/sd3",
@@ -135,6 +393,10 @@ const FAL_PRESET_SIZES = {
  * @param {object} options.credentials - Provider credentials { apiKey, accessToken }
  * @param {object} options.log - Logger
  * @param {string} [options.resolvedProvider] - Pre-resolved provider ID (from route layer custom model resolution)
+ * @param {string|null} [options.peerLocality] - Trusted "loopback"|"lan"|"remote" verdict
+ *   forwarded from `AUTHZ_HEADER_PEER_LOCALITY` (src/server/authz/headers.ts). Only consumed by
+ *   spawn-capable providers (e.g. cursor-agent-image) to enforce Hard Rules #15/#17 without
+ *   loopback-gating the whole route for every non-spawning image provider.
  */
 export async function handleImageGeneration({
   body,
@@ -143,7 +405,40 @@ export async function handleImageGeneration({
   resolvedProvider = null,
   signal = null,
   clientHeaders = null,
+  peerLocality = null,
+  // #16260 — IMAGE_GENERATION_LONG_JOBS, injected by the routes (the flag lives in src/):
+  // `{ resolveTimeoutMs }` for the OpenAI-compatible path. Null keeps the default behavior.
+  longJobs = null,
 }) {
+  // Retirement guards: the retired-provider sets hold bare provider ids only, so testing
+  // the `<provider>/` prefix (or the whole model when it carries no slash) covers both the
+  // `provider/model` and bare-id request shapes.
+  const requestedModel = typeof body?.model === "string" ? body.model : "";
+  const slash = requestedModel.indexOf("/");
+  const requestedPrefix = slash > 0 ? requestedModel.slice(0, slash) : requestedModel;
+  if (
+    isMicrosoftDesignerWebRetiredProviderId(resolvedProvider) ||
+    isMicrosoftDesignerWebRetiredProviderId(requestedPrefix)
+  ) {
+    return {
+      success: false,
+      status: HTTP_STATUS.GONE,
+      error: MICROSOFT_DESIGNER_WEB_RETIRED_MESSAGE,
+    };
+  }
+
+  if (
+    isCommonChatGptWebRetiredProviderId(resolvedProvider) ||
+    isCommonChatGptWebRetiredProviderId(requestedPrefix)
+  ) {
+    return {
+      success: false,
+      status: HTTP_STATUS.GONE,
+      error: CHATGPT_WEB_RETIRED_MESSAGE,
+      code: CHATGPT_WEB_RETIRED_ERROR_CODE,
+    };
+  }
+
   let provider, model;
 
   if (resolvedProvider) {
@@ -188,13 +483,25 @@ export async function handleImageGeneration({
 
     const syntheticConfig = {
       id: provider,
-      baseUrl:
-        credentials?.baseUrl ||
-        `https://generativelanguage.googleapis.com/v1beta/openai/images/generations`,
+      // #3205: custom OpenAI-compatible nodes store their base URL in
+      // credentials.providerSpecificData.baseUrl (same as the chat path —
+      // see executors/default.ts:buildUrl / services/provider.ts:buildProviderUrl).
+      // Previously only the (always-absent) top-level credentials.baseUrl was
+      // read, so every custom image node fell back to the Gemini endpoint and
+      // returned "Please pass a valid API key".
+      baseUrl: resolveImageBaseUrl(credentials, "", "generations", true),
       authType: "apikey",
       authHeader: "bearer",
       format: "openai",
     };
+
+    if (!syntheticConfig.baseUrl) {
+      return {
+        success: false,
+        status: 501,
+        error: `Image generation is not configured for custom provider: ${provider}`,
+      };
+    }
 
     return handleOpenAIImageGeneration({
       model,
@@ -203,11 +510,98 @@ export async function handleImageGeneration({
       body,
       credentials,
       log,
+      signal,
+      longJobs,
+    });
+  }
+
+  const requestedCount = resolveRequestedImageCount(body.n);
+  if (requestedCount > 1 && SINGLE_IMAGE_FANOUT_FORMATS.has(providerConfig.format)) {
+    const count = Math.min(requestedCount, IMAGE_FANOUT_MAX_N);
+    if (count < requestedCount && typeof log?.warn === "function")
+      log.warn("IMAGE", `n=${requestedCount} clamped to ${IMAGE_FANOUT_MAX_N}`);
+    return fanOutSingleImageCalls({
+      body,
+      count,
+      label: `${provider}/${model}`,
+      log,
+      signal,
+      generateOne: (taskBody) =>
+        handleImageGeneration({
+          body: taskBody,
+          credentials,
+          log,
+          resolvedProvider,
+          signal,
+          clientHeaders,
+          peerLocality,
+        }),
+    });
+  }
+
+  if (providerConfig.format === "zenmux-image") {
+    return handleZenmuxImageGeneration({
+      model,
+      provider,
+      providerConfig,
+      body,
+      credentials,
+      log,
+      signal,
+    });
+  }
+
+  if (providerConfig.format === "muse-image") {
+    return handleMuseImageGeneration({
+      model,
+      provider,
+      body,
+      credentials,
+      log,
+      signal,
+      deps: {
+        saveCallLog,
+        fetchRemoteImage: fetchUntrustedRemoteImage,
+        fetchWithTimeout,
+        isTimeoutError: (err) => err instanceof FetchTimeoutError,
+      },
+    });
+  }
+
+  if (providerConfig.format === "aihorde") {
+    return handleAiHordeImageGeneration({
+      model,
+      provider,
+      providerConfig,
+      body,
+      credentials,
+      log,
+      signal,
     });
   }
 
   if (providerConfig.format === "gemini-image") {
     return handleGeminiImageGeneration({ model, providerConfig, body, credentials, log });
+  }
+
+  if (providerConfig.format === "gemini-ai-image") {
+    return handleGeminiAiImageGeneration({
+      model,
+      providerConfig,
+      body,
+      credentials,
+      aspectRatio: normalizeImageAspectRatio(body.aspect_ratio, body.size),
+      signal,
+      log,
+      deps: {
+        saveCallLog,
+        saveErrorResult: saveImageErrorResult,
+        sanitizeProviderError: sanitizeImageProviderError,
+        fetchWithTimeout,
+        isTimeoutError: (err) => err instanceof FetchTimeoutError,
+        timeoutMs: getConfiguredTimeout(),
+      },
+    });
   }
 
   if (providerConfig.format === "imagen3") {
@@ -223,6 +617,17 @@ export async function handleImageGeneration({
 
   if (providerConfig.format === "hyperbolic") {
     return handleHyperbolicImageGeneration({
+      model,
+      provider,
+      providerConfig,
+      body,
+      credentials,
+      log,
+    });
+  }
+
+  if (providerConfig.format === "huggingface-image") {
+    return handleHuggingFaceImageGeneration({
       model,
       provider,
       providerConfig,
@@ -287,20 +692,79 @@ export async function handleImageGeneration({
     });
   }
 
-  if (providerConfig.format === "chatgpt-web") {
-    return handleChatGptWebImageGeneration({
+  if (providerConfig.format === "segmind") {
+    return handleSegmindImageGeneration({
+      model,
+      provider,
+      providerConfig,
+      body,
+      credentials,
+      log,
+    });
+  }
+
+  if (providerConfig.format === "cursor-agent-image") {
+    return handleCursorAgentImageGeneration({
+      model,
+      provider,
+      providerConfig,
+      body,
+      credentials,
+      log,
+      peerLocality,
+    });
+  }
+
+  if (providerConfig.format === "maxai-image") {
+    return handleMaxaiImageGeneration({
       model,
       provider,
       body,
       credentials,
       log,
       signal,
-      clientHeaders,
     });
+  }
+
+  if (providerConfig.format === "uc-image") {
+    return handleUcImageGeneration({
+      model,
+      provider,
+      body,
+      credentials,
+      log,
+      signal,
+    });
+  }
+
+  if (providerConfig.format === "adobe-firefly-image") {
+    return handleAdobeFireflyImageGeneration({
+      model,
+      provider,
+      providerConfig,
+      body,
+      credentials,
+      log,
+    });
+  }
+
+  if (providerConfig.format === "syntx-image") {
+    return handleSyntxImageGeneration({ model, provider, providerConfig, body, credentials, log });
   }
 
   if (providerConfig.format === "nanobanana") {
     return handleNanoBananaImageGeneration({
+      model,
+      provider,
+      providerConfig,
+      body,
+      credentials,
+      log,
+    });
+  }
+
+  if (providerConfig.format === "kie-image") {
+    return handleKieImageGeneration({
       model,
       provider,
       providerConfig,
@@ -315,7 +779,16 @@ export async function handleImageGeneration({
   }
 
   if (providerConfig.format === "comfyui") {
-    return handleComfyUIImageGeneration({ model, provider, providerConfig, body, log });
+    return handleComfyUIImageGeneration({
+      model,
+      provider,
+      providerConfig: {
+        ...providerConfig,
+        baseUrl: resolveComfyUiBaseUrl(credentials, providerConfig.baseUrl),
+      },
+      body,
+      log,
+    });
   }
 
   if (providerConfig.format === "codex-responses") {
@@ -329,54 +802,425 @@ export async function handleImageGeneration({
     });
   }
 
-  return handleOpenAIImageGeneration({ model, provider, providerConfig, body, credentials, log });
+  if (providerConfig.format === "haiper-image") {
+    return handleHaiperImageGeneration({ model, provider, providerConfig, body, credentials, log });
+  }
+  if (providerConfig.format === "leonardo-image") {
+    return handleLeonardoImageGeneration({
+      model,
+      provider,
+      providerConfig,
+      body,
+      credentials,
+      log,
+    });
+  }
+  if (providerConfig.format === "ideogram-image") {
+    return handleIdeogramImageGeneration({
+      model,
+      provider,
+      providerConfig,
+      body,
+      credentials,
+      log,
+    });
+  }
+  if (providerConfig.format === "magnific-image" || providerConfig.format === "freepik-image") {
+    return handleMagnificImageGeneration({
+      model,
+      provider,
+      providerConfig,
+      body,
+      credentials,
+      log,
+    });
+  }
+
+  if (providerConfig.format === "nvidia-nim") {
+    return handleNvidiaNimImageGeneration({
+      model,
+      provider,
+      providerConfig,
+      body,
+      credentials,
+      log,
+    });
+  }
+
+  if (providerConfig.format === "cloudflare-ai-image") {
+    return handleCloudflareAiImageGeneration({
+      model,
+      provider,
+      providerConfig,
+      body,
+      credentials,
+      log,
+    });
+  }
+
+  if (providerConfig.format === "minimax-image") {
+    return handleMinimaxImageGeneration({
+      model,
+      provider,
+      providerConfig,
+      body,
+      credentials,
+      log,
+    });
+  }
+
+  if (
+    providerConfig.format === "agnes-image" &&
+    (typeof body.size !== "string" || body.size.trim().length === 0)
+  ) {
+    return {
+      success: false,
+      status: 400,
+      error: "Size is required for Agnes Image 2.1 Flash",
+    };
+  }
+
+  if (
+    providerConfig.format === "alibaba-image" ||
+    providerConfig.format === "qwen-cloud-image" ||
+    providerConfig.format === "qwen-token-plan-image" ||
+    providerConfig.format === "bailian-coding-plan-image"
+  ) {
+    return handleAlibabaImageGeneration({
+      model,
+      provider,
+      providerConfig,
+      body,
+      credentials,
+      log,
+    });
+  }
+
+  return handleOpenAIImageGeneration({
+    model,
+    provider,
+    providerConfig,
+    body,
+    credentials,
+    log,
+    signal,
+    longJobs,
+  });
 }
 
+function normalizeKieImageResult(recordData: unknown): string[] {
+  const record = isJsonObject(recordData) ? recordData : {};
+  const data = isJsonObject(record.data) ? record.data : {};
+  const response = isJsonObject(data.response) ? data.response : {};
+  const resultJson = parseKieResultJson(recordData);
+  const urls = new Set<string>();
+
+  const add = (val: unknown) => {
+    if (typeof val === "string" && val.startsWith("http")) urls.add(val);
+    if (Array.isArray(val)) {
+      val.forEach((v) => {
+        if (typeof v === "string" && v.startsWith("http")) urls.add(v);
+      });
+    }
+  };
+
+  // Check resultJson (common in Market API)
+  add(resultJson?.resultUrls);
+  add(resultJson?.imageUrls);
+  add(resultJson?.resultUrl);
+  add(resultJson?.imageUrl);
+
+  // Check data.response (common in 4o-image API); resultImageUrl(s) is the
+  // flux/kontext shape normalizeNanoBananaTaskResult also reads (#14335 LEDGER-11).
+  add(response.resultUrls);
+  add(response.resultUrl);
+  add(response.resultImageUrl);
+  add(response.resultImageUrls);
+
+  // Check direct data fields
+  add(data.resultImageUrls);
+  add(data.resultImageUrl);
+  add(data.url);
+
+  return Array.from(urls);
+}
+
+async function handleKieImageGeneration({
+  model,
+  provider,
+  providerConfig,
+  body,
+  credentials,
+  log,
+}: KieImageOptions) {
+  const startTime = Date.now();
+  const token = credentials?.apiKey || credentials?.accessToken;
+  const timeoutMs = normalizePositiveNumber(body.timeout_ms, 300000);
+  const pollIntervalMs = normalizePositiveNumber(body.poll_interval_ms, 2500);
+  const prompt = typeof body.prompt === "string" ? body.prompt : String(body.prompt ?? "");
+  const size = typeof body.size === "string" ? body.size : undefined;
+
+  if (!token) {
+    return saveImageErrorResult({
+      provider,
+      model,
+      status: 401,
+      startTime,
+      error: "KIE API key is required",
+    });
+  }
+
+  // Check if model is a Market model (unified API)
+  const fullRegistry = getImageProvider(provider);
+  const modelEntry = fullRegistry?.models?.find((m) => m.id === model);
+  const isFluxKontext = Boolean(modelEntry?.kieFluxKontextModel);
+  const isMarket = !isFluxKontext && (modelEntry?.isMarket || model.includes("/"));
+
+  const { imageUrl } = extractImageInputs(body);
+  let baseUrl = "";
+  let payload: Record<string, unknown> = {};
+
+  if (isFluxKontext) {
+    // Preserve the dedicated API and choose Pro/Max from the catalog contract.
+    baseUrl = `${providerConfig.baseUrl.replace(/\/$/, "")}/api/v1/flux/kontext/generate`;
+    payload = {
+      prompt,
+      aspectRatio: mapImageSize(size),
+      model: modelEntry.kieFluxKontextModel,
+      ...(imageUrl ? { inputImage: imageUrl } : {}),
+    };
+  } else if (isMarket) {
+    // Unified Market API endpoint
+    baseUrl = `${providerConfig.baseUrl.replace(/\/$/, "")}/api/v1/jobs/createTask`;
+    const input: Record<string, unknown> = {
+      prompt,
+      aspect_ratio: mapImageSize(size),
+    };
+    if (imageUrl) {
+      input.image_url = imageUrl;
+    }
+    payload = {
+      model: resolveKieMarketUpstreamModelId(model),
+      input,
+    };
+  } else {
+    // Legacy/Direct endpoint
+    const modelPath = model.replace("-t2i", "").replace("-i2i", "");
+    baseUrl = providerConfig.baseUrl.includes(model)
+      ? providerConfig.baseUrl
+      : `https://api.kie.ai/api/v1/${modelPath}/generate`;
+
+    payload = {
+      prompt,
+      size: mapImageSize(size),
+      nVariants: body.n || 1,
+    };
+  }
+
+  if (log) {
+    const promptPreview = String(body.prompt ?? "").slice(0, 60);
+    log.info(
+      "IMAGE",
+      `${provider}/${model} (${isFluxKontext ? "flux-kontext" : isMarket ? "market" : "direct"}) | prompt: "${promptPreview}..."`
+    );
+  }
+
+  try {
+    const endpoint = isFluxKontext
+      ? "/api/v1/flux/kontext/generate"
+      : isMarket
+        ? "/api/v1/jobs/createTask"
+        : new URL(baseUrl).pathname;
+    const createBaseUrl =
+      isFluxKontext || isMarket ? providerConfig.baseUrl : baseUrl.replace(endpoint, "");
+    const createData = await kieExecutor.createTask({
+      baseUrl: createBaseUrl,
+      token,
+      payload,
+      endpoint,
+    });
+    const taskId = getKieTaskId(createData);
+
+    if (!taskId) {
+      const errorMessage =
+        createData?.msg ||
+        createData?.message ||
+        createData?.error ||
+        "KIE image generation did not return taskId";
+      if (log) {
+        log.error("IMAGE", `KIE createTask failed: ${JSON.stringify(createData)}`);
+      }
+      return saveImageErrorResult({
+        provider,
+        model,
+        status: 502,
+        startTime,
+        error: errorMessage,
+        requestBody: payload,
+      });
+    }
+
+    // Use statusUrl from providerConfig if available, fallback to dynamic derivation
+    const statusUrl = isFluxKontext
+      ? `${providerConfig.baseUrl.replace(/\/$/, "")}/api/v1/flux/kontext/record-info`
+      : isMarket
+        ? `${providerConfig.baseUrl.replace(/\/$/, "")}/api/v1/jobs/recordInfo`
+        : providerConfig.statusUrl && !providerConfig.statusUrl.includes("jobs/recordInfo")
+          ? providerConfig.statusUrl
+          : baseUrl.replace(/\/generate$/, "/record-info");
+
+    const { data: recordData, state } = await kieExecutor.pollTask({
+      statusUrl,
+      taskId: String(taskId),
+      token,
+      timeoutMs,
+      pollIntervalMs,
+    });
+
+    const kieUrls = state === "success" ? normalizeKieImageResult(recordData) : [];
+    // #14335 LEDGER-13: a "success" state with zero usable urls falls through to
+    // the failure branch below instead of a fake HTTP-200 success with data:[].
+    if (kieUrls.length > 0) {
+      if (log) {
+        log.info("IMAGE", `KIE poll success for task ${taskId}`);
+      }
+      const images = kieUrls.map((url: string) => ({ url, revised_prompt: prompt }));
+
+      return saveImageSuccessResult({
+        provider,
+        model,
+        startTime,
+        requestBody: payload,
+        responseBody: { images_count: images.length },
+        images,
+      });
+    }
+
+    const record = isJsonObject(recordData) ? recordData : {};
+    const recordDataBody = isJsonObject(record.data) ? record.data : {};
+    const errorMessage =
+      recordDataBody.errorMessage ||
+      recordDataBody.failMsg ||
+      record.msg ||
+      "KIE image task failed";
+
+    if (log) {
+      log.error("IMAGE", `KIE poll failed for task ${taskId}: ${JSON.stringify(recordData)}`);
+    }
+
+    return saveImageErrorResult({
+      provider,
+      model,
+      status: 502,
+      startTime,
+      error: String(errorMessage),
+      requestBody: payload,
+    });
+  } catch (err: unknown) {
+    return saveImageErrorResult({
+      provider,
+      model,
+      status: getKieErrorStatus(err, 502),
+      startTime,
+      error: `Image provider error: ${getKieErrorMessage(err, "KIE image generation failed")}`,
+    });
+  }
+}
 /**
  * Handle Gemini-format image generation (Antigravity / Nano Banana)
  * Uses Gemini's generateContent API with responseModalities: ["TEXT", "IMAGE"]
  */
 async function handleGeminiImageGeneration({ model, providerConfig, body, credentials, log }) {
   const startTime = Date.now();
-  const url = `${providerConfig.baseUrl}/${model}:generateContent`;
+  const url = providerConfig.baseUrl;
   const provider = "antigravity";
+  const credentialRecord = credentials || {};
+  const token = credentialRecord.accessToken || credentialRecord.apiKey;
+  const providerSpecificData = credentialRecord.providerSpecificData;
+  const providerSpecificProjectId =
+    providerSpecificData && typeof providerSpecificData === "object"
+      ? (providerSpecificData as Record<string, unknown>).projectId
+      : null;
+  const credentialProjectId =
+    typeof credentialRecord.projectId === "string" ? credentialRecord.projectId.trim() : "";
+  const providerProjectId =
+    typeof providerSpecificProjectId === "string" ? providerSpecificProjectId.trim() : "";
+  const projectId = credentialProjectId || providerProjectId || null;
+  const candidateCount =
+    typeof body.n === "number" && Number.isFinite(body.n) && body.n > 0 ? Math.floor(body.n) : 1;
+  const promptText = typeof body.prompt === "string" ? body.prompt : String(body.prompt ?? "");
+  const aspectRatio = normalizeImageAspectRatio(body.aspect_ratio, body.size);
+  const { value: imageSize, clamped: imageSizeClamped } = normalizeImageGenerationSize(
+    body.image_size
+  );
+  if (imageSizeClamped && log && typeof log.warn === "function") {
+    log.warn(
+      "IMAGE",
+      `antigravity/${model}: unsupported image_size ${JSON.stringify(body.image_size)} — clamped to 1K (accepted: 1K|2K|4K)`
+    );
+  }
 
-  // Summarized request for call log
+  // Summarized request for call log. Both axes are recorded so the log never hides what the
+  // client asked for: `image_size` is the raw caller value (null when absent) and
+  // `image_size_applied` is what went upstream ("default" when the key was omitted).
   const logRequestBody = {
     model: body.model,
-    prompt:
-      typeof body.prompt === "string"
-        ? body.prompt.slice(0, 200)
-        : String(body.prompt ?? "").slice(0, 200),
+    prompt: promptText.slice(0, 200),
     size: body.size || "default",
-    n: body.n || 1,
+    aspect_ratio: aspectRatio,
+    image_size: body.image_size ?? null,
+    image_size_applied: imageSize ?? "default",
+    n: candidateCount,
   };
 
-  const geminiBody = {
-    contents: [
-      {
-        parts: [{ text: body.prompt }],
+  if (!projectId || typeof projectId !== "string") {
+    return saveImageErrorResult({
+      provider,
+      model,
+      status: 400,
+      startTime,
+      error:
+        "Missing Google projectId for Antigravity account. Please reconnect OAuth in Providers so OmniRoute can fetch your Cloud Code project.",
+      requestBody: logRequestBody,
+    });
+  }
+
+  const inlineImage = geminiInlineImagePart(body);
+  const antigravityBody = {
+    project: projectId,
+    requestId: `image_gen/${Date.now()}/${randomUUID()}/0`,
+    request: {
+      contents: [
+        {
+          role: "user",
+          parts: [...(inlineImage ? [inlineImage] : []), { text: promptText }],
+        },
+      ],
+      generationConfig: {
+        candidateCount,
+        imageConfig: {
+          aspectRatio,
+          ...(imageSize ? { imageSize } : {}),
+        },
       },
-    ],
-    generationConfig: {
-      responseModalities: ["TEXT", "IMAGE"],
     },
+    model,
+    userAgent: getAntigravityEnvelopeUserAgent(credentialRecord),
+    requestType: "image_gen",
   };
 
-  const token = credentials.accessToken || credentials.apiKey;
   const headers = {
     "Content-Type": "application/json",
     Authorization: `Bearer ${token}`,
   };
+  applyAntigravityClientProfileHeaders(headers, credentialRecord, antigravityBody);
+  delete headers["x-goog-user-project"];
 
   if (log) {
-    const promptPreview =
-      typeof body.prompt === "string"
-        ? body.prompt.slice(0, 60)
-        : String(body.prompt ?? "").slice(0, 60);
+    const promptPreview = promptText.slice(0, 60);
     log.info(
       "IMAGE",
-      `antigravity/${model} (gemini) | prompt: "${promptPreview}..." | format: gemini-image`
+      `antigravity/${model} (gemini) | prompt: "${promptPreview}..." | ${aspectRatio} ${imageSize ?? "default"}`
     );
   }
 
@@ -384,13 +1228,16 @@ async function handleGeminiImageGeneration({ model, providerConfig, body, creden
     const response = await fetch(url, {
       method: "POST",
       headers,
-      body: JSON.stringify(geminiBody),
+      body: JSON.stringify(antigravityBody),
     });
 
     if (!response.ok) {
       const errorText = await response.text();
+      const safeError = sanitizeImageProviderError(errorText);
+      const safeErrorLog =
+        typeof safeError === "string" ? safeError : JSON.stringify(safeError ?? {});
       if (log) {
-        log.error("IMAGE", `antigravity error ${response.status}: ${errorText.slice(0, 200)}`);
+        log.error("IMAGE", `antigravity error ${response.status}: ${safeErrorLog.slice(0, 200)}`);
       }
 
       saveCallLog({
@@ -400,25 +1247,26 @@ async function handleGeminiImageGeneration({ model, providerConfig, body, creden
         model: `antigravity/${model}`,
         provider,
         duration: Date.now() - startTime,
-        error: errorText.slice(0, 500),
+        error: safeErrorLog.slice(0, 500),
         requestBody: logRequestBody,
       }).catch(() => {});
 
-      return { success: false, status: response.status, error: errorText };
+      return { success: false, status: response.status, error: safeError };
     }
 
     const data = await response.json();
+    const responseBody = data.response || data;
 
-    // Extract image data from Gemini response
+    // Extract image data from Antigravity's wrapped Gemini response.
     const images = [];
-    const candidates = data.candidates || [];
+    const candidates = responseBody.candidates || [];
     for (const candidate of candidates) {
       const parts = candidate.content?.parts || [];
       for (const part of parts) {
         if (part.inlineData) {
           images.push({
             b64_json: part.inlineData.data,
-            revised_prompt: parts.find((p) => p.text)?.text || body.prompt,
+            revised_prompt: parts.find((p) => p.text)?.text || promptText,
           });
         }
       }
@@ -459,13 +1307,44 @@ async function handleGeminiImageGeneration({ model, providerConfig, body, creden
       requestBody: logRequestBody,
     }).catch(() => {});
 
-    return { success: false, status: 502, error: `Image provider error: ${err.message}` };
+    return {
+      success: false,
+      status: 502,
+      error: `Image provider error: ${sanitizeErrorMessage((err as Error).message || err)}`,
+    };
   }
 }
 
 /**
  * Handle OpenAI-compatible image generation (standard providers + Nebius fallback)
  */
+function buildAgnesImageRequestBody(model, body) {
+  const upstreamBody: Record<string, unknown> = {
+    model,
+    prompt: body.prompt,
+  };
+
+  if (body.size !== undefined) upstreamBody.size = body.size;
+  if (body.ratio !== undefined) {
+    upstreamBody.ratio = body.ratio;
+  } else if (body.aspect_ratio !== undefined) {
+    upstreamBody.ratio = body.aspect_ratio;
+  }
+  if (body.return_base64 !== undefined) upstreamBody.return_base64 = body.return_base64;
+
+  const explicitExtraBody =
+    body.extra_body && typeof body.extra_body === "object" && !Array.isArray(body.extra_body)
+      ? body.extra_body
+      : {};
+  const extraBody: Record<string, unknown> = { ...explicitExtraBody };
+  const { imageUrls } = extractImageInputs(body);
+  if (imageUrls.length > 0) extraBody.image = imageUrls;
+  if (body.response_format !== undefined) extraBody.response_format = body.response_format;
+  if (Object.keys(extraBody).length > 0) upstreamBody.extra_body = extraBody;
+
+  return upstreamBody;
+}
+
 async function handleOpenAIImageGeneration({
   model,
   provider,
@@ -473,6 +1352,8 @@ async function handleOpenAIImageGeneration({
   body,
   credentials,
   log,
+  signal,
+  longJobs,
 }) {
   const startTime = Date.now();
 
@@ -489,33 +1370,55 @@ async function handleOpenAIImageGeneration({
   };
 
   // Build upstream request (OpenAI-compatible format)
-  const upstreamBody: Record<string, unknown> = {
-    model: model,
-    prompt: body.prompt,
-  };
+  const upstreamBody: Record<string, unknown> =
+    providerConfig.format === "agnes-image"
+      ? buildAgnesImageRequestBody(model, body)
+      : {
+          model,
+          prompt: body.prompt,
+        };
 
-  // Pass optional parameters
-  if (body.n !== undefined) upstreamBody.n = body.n;
-  if (body.size !== undefined) upstreamBody.size = body.size;
-  if (body.quality !== undefined) upstreamBody.quality = body.quality;
-  if (body.response_format !== undefined) upstreamBody.response_format = body.response_format;
-  if (body.style !== undefined) upstreamBody.style = body.style;
+  if (providerConfig.format === "xai-image") {
+    const request = buildXaiImageRequest(model, body);
+    if ("error" in request) return { success: false, status: 400, error: request.error };
+    Object.assign(upstreamBody, request.body);
+  } else if (providerConfig.format !== "agnes-image") {
+    // Pass optional parameters for ordinary OpenAI-compatible providers.
+    if (body.n !== undefined) upstreamBody.n = body.n;
+    if (body.size !== undefined) upstreamBody.size = body.size;
+    if (body.quality !== undefined) upstreamBody.quality = body.quality;
+    if (body.response_format !== undefined) upstreamBody.response_format = body.response_format;
+    if (body.style !== undefined) upstreamBody.style = body.style;
 
-  const { imageUrl } = extractImageInputs(body);
-  if (imageUrl && OPENAI_IMAGE_TO_IMAGE_MODELS.has(model)) {
-    upstreamBody.image_url = imageUrl;
+    const { imageUrl } = extractImageInputs(body);
+    if (imageUrl && OPENAI_IMAGE_TO_IMAGE_MODELS.has(model)) {
+      upstreamBody.image_url = imageUrl;
+    }
   }
 
   // Build headers
-  const headers = {
+  let headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
 
   const token = credentials.apiKey || credentials.accessToken;
-  if (providerConfig.authHeader === "bearer") {
+  if (token && providerConfig.authHeader === "bearer") {
     headers["Authorization"] = `Bearer ${token}`;
-  } else if (providerConfig.authHeader === "x-api-key") {
+  } else if (token && providerConfig.authHeader === "x-api-key") {
     headers["x-api-key"] = token;
+  }
+
+  // #8085 — keyless Pollinations image requests (the common free case) get
+  // no Authorization header above. Mirror the chat executor's anonymous
+  // fingerprint-pool fallback (open-sse/executors/pollinations.ts) so the
+  // outbound request isn't sent bare and rejected by Pollinations' own 401.
+  let pollinationsAnonSession: Awaited<
+    ReturnType<typeof applyPollinationsAnonymousFallback>
+  >["session"] = null;
+  if (providerConfig.id === "pollinations") {
+    const anon = await applyPollinationsAnonymousFallback(providerConfig.id, token, headers);
+    headers = anon.headers;
+    pollinationsAnonSession = anon.session;
   }
 
   if (log) {
@@ -530,6 +1433,11 @@ async function handleOpenAIImageGeneration({
   }
 
   const requestBody = JSON.stringify(upstreamBody);
+  // #16260 — the deadline always covers the body read (existing budget). The per-connection
+  // timeout and caller cancellation (499) only apply with IMAGE_GENERATION_LONG_JOBS on.
+  const fetchOptions = longJobs
+    ? { signal, timeoutMs: longJobs.resolveTimeoutMs(credentials?.providerSpecificData) }
+    : { timeoutMs: getConfiguredTimeout() };
 
   // Try primary URL
   let result = await fetchImageEndpoint(
@@ -537,7 +1445,8 @@ async function handleOpenAIImageGeneration({
     headers,
     requestBody,
     provider,
-    log
+    log,
+    fetchOptions
   );
 
   // Fallback for providers with fallbackUrl (e.g., Nebius)
@@ -554,8 +1463,13 @@ async function handleOpenAIImageGeneration({
       headers,
       requestBody,
       provider,
-      log
+      log,
+      fetchOptions
     );
+  }
+
+  if (pollinationsAnonSession) {
+    reportPollinationsAnonOutcome(pollinationsAnonSession, result.status);
   }
 
   // Save call log after result is determined
@@ -579,367 +1493,225 @@ async function handleOpenAIImageGeneration({
   return result;
 }
 
-const CHATGPT_WEB_IMAGE_MARKDOWN_RE = /!\[[^\]]*\]\(([^)\s]+)\)/g;
-const CHATGPT_WEB_IMAGE_ID_RE = /\/v1\/chatgpt-web\/image\/([a-f0-9]{16,64})(?=[?\s"'<>)]|$)/i;
-
-function extractMarkdownImageUrls(text: string): string[] {
-  const urls: string[] = [];
-  // String.prototype.matchAll consumes a fresh iterator and ignores the
-  // regex's lastIndex, so no manual reset is required.
-  for (const match of text.matchAll(CHATGPT_WEB_IMAGE_MARKDOWN_RE)) {
-    if (match[1]) urls.push(match[1]);
-  }
-  return urls;
-}
-
-function buildChatGptWebImagePrompt(body): string {
-  const prompt = String(body.prompt || "").trim();
-  const details: string[] = [`Create an image for this prompt: ${prompt}`];
-  if (typeof body.size === "string" && body.size.trim()) {
-    details.push(`Requested size: ${body.size.trim()}.`);
-  }
-  if (typeof body.quality === "string" && body.quality.trim()) {
-    details.push(`Requested quality: ${body.quality.trim()}.`);
-  }
-  if (typeof body.style === "string" && body.style.trim()) {
-    details.push(`Requested style: ${body.style.trim()}.`);
-  }
-  return details.join("\n");
-}
-
-async function handleChatGptWebImageGeneration({
+/**
+ * OpenAI-compatible image *edit* forwarder for custom providers (#3214 / #3215).
+ *
+ * Mirrors `handleOpenAIImageGeneration` but posts multipart/form-data to the node's
+ * `/images/edits` endpoint and returns the upstream OpenAI-compatible response. Kept
+ * separate from provider-specific hosted-tool flows. The fetch helper leaves Content-Type unset so
+ * `fetch` derives the multipart boundary from the FormData body.
+ */
+export async function handleOpenAIImageEdit({
   model,
   provider,
-  body,
   credentials,
+  prompt,
+  imageBytes,
+  imageMime,
+  size,
+  responseFormat,
+  n = 1,
   log,
-  signal,
-  clientHeaders,
+}: {
+  model: string;
+  provider: string;
+  credentials:
+    | {
+        apiKey?: string;
+        accessToken?: string;
+        baseUrl?: unknown;
+        providerSpecificData?: { baseUrl?: unknown } | null;
+      }
+    | null
+    | undefined;
+  prompt: string;
+  imageBytes: Buffer;
+  imageMime?: string | null;
+  size?: string | null;
+  responseFormat?: string | null;
+  n?: number;
+  log?: { info: (tag: string, message: string) => void } | null;
 }) {
   const startTime = Date.now();
-  const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
-  if (!prompt) {
-    return saveImageErrorResult({
-      provider,
-      model,
-      status: 400,
-      startTime,
-      error: "Prompt is required for ChatGPT Web image generation",
-    });
-  }
+  const url = resolveImageBaseUrl(
+    credentials,
+    `https://generativelanguage.googleapis.com/v1beta/openai/images/edits`,
+    "edits"
+  );
 
-  if (!credentials?.apiKey) {
-    return saveImageErrorResult({
-      provider,
-      model,
-      status: 401,
-      startTime,
-      error: "ChatGPT Web credentials missing session cookie",
-    });
-  }
+  // Build the multipart body as a Buffer with an explicit boundary instead of a global
+  // `FormData`. In production `globalThis.fetch` is patched with node_modules/undici's fetch,
+  // whose `FormData` class differs from `globalThis.FormData` — passing a native FormData
+  // makes undici serialize it as the string "[object FormData]" (text/plain), dropping every
+  // field (including `model`, which reaches the upstream empty). A Buffer body is accepted
+  // verbatim by any fetch implementation. (#3273)
+  const boundary = `----OmniRouteImageEdit${randomUUID().replace(/-/g, "")}`;
+  const CRLF = "\r\n";
+  const partBuffers: Buffer[] = [];
+  const appendField = (name: string, value: string) => {
+    partBuffers.push(
+      Buffer.from(
+        `--${boundary}${CRLF}Content-Disposition: form-data; name="${name}"${CRLF}${CRLF}${value}${CRLF}`
+      )
+    );
+  };
+  appendField("model", model);
+  appendField("prompt", prompt);
+  if (size) appendField("size", size);
+  if (responseFormat) appendField("response_format", responseFormat);
+  appendField("n", String(n || 1));
+  partBuffers.push(
+    Buffer.from(
+      `--${boundary}${CRLF}Content-Disposition: form-data; name="image"; filename="image.png"${CRLF}` +
+        `Content-Type: ${imageMime || "image/png"}${CRLF}${CRLF}`
+    )
+  );
+  partBuffers.push(imageBytes);
+  partBuffers.push(Buffer.from(`${CRLF}--${boundary}--${CRLF}`));
+  const multipartBody = Buffer.concat(partBuffers);
 
-  // Each image is one chatgpt.com chat turn (~30s). Cap at 4 (matches OpenAI's
-  // own limit for image-1 / dall-e-3) so a stray n=1000 doesn't pin the
-  // executor for hours before the upstream HTTP timeout fires.
-  const CHATGPT_WEB_IMAGE_N_MAX = 4;
-  const rawCount = Number.isInteger(body.n) && (body.n as number) > 0 ? (body.n as number) : 1;
-  if (rawCount > CHATGPT_WEB_IMAGE_N_MAX) {
-    return saveImageErrorResult({
-      provider,
-      model,
-      status: 400,
-      startTime,
-      error: `ChatGPT Web image generation supports n=1..${CHATGPT_WEB_IMAGE_N_MAX} (got ${rawCount}); each n is a separate ~30s chat turn.`,
-    });
-  }
-  const requestedCount = rawCount;
-  if (log && requestedCount > 1) {
-    log.warn(
+  const headers: Record<string, string> = {
+    "Content-Type": `multipart/form-data; boundary=${boundary}`,
+  };
+  const token = credentials?.apiKey || credentials?.accessToken;
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  if (log) {
+    log.info(
       "IMAGE",
-      `ChatGPT Web returns one image per chat turn; requested n=${requestedCount} will run sequentially`
+      `${provider}/${model} (edit) | prompt: "${prompt.slice(0, 60)}..." -> ${url}`
     );
   }
 
-  const wantsBase64 = body.response_format === "b64_json";
-  const images: Array<{ url?: string; b64_json?: string }> = [];
-  const requestBody = {
-    model,
-    prompt: prompt.slice(0, 500),
-    size: body.size || undefined,
-    quality: body.quality || undefined,
-  };
-
-  for (let i = 0; i < requestedCount; i++) {
-    const executor = new ChatGptWebExecutor();
-    const result = await executor.execute({
-      model,
-      body: {
-        messages: [{ role: "user", content: buildChatGptWebImagePrompt(body) }],
-      },
-      stream: false,
-      credentials,
-      signal,
-      log,
-      clientHeaders,
-    });
-
-    const responseText = await result.response.text();
-    if (result.response.status >= 400) {
-      return saveImageErrorResult({
-        provider,
-        model,
-        status: result.response.status,
-        startTime,
-        error: responseText,
-        requestBody,
-      });
-    }
-
-    let content = "";
-    try {
-      const json = JSON.parse(responseText);
-      content = String(json?.choices?.[0]?.message?.content || "");
-    } catch {
-      content = responseText;
-    }
-
-    const urls = extractMarkdownImageUrls(content);
-    if (urls.length === 0) {
-      return saveImageErrorResult({
-        provider,
-        model,
-        status: 502,
-        startTime,
-        error: `ChatGPT Web completed without returning image markdown: ${content.slice(0, 300)}`,
-        requestBody,
-      });
-    }
-
-    for (const url of urls) {
-      if (!wantsBase64) {
-        images.push({ url });
-        continue;
-      }
-      const id = url.match(CHATGPT_WEB_IMAGE_ID_RE)?.[1];
-      const cached = id ? getChatGptImage(id) : null;
-      if (!cached) {
-        return saveImageErrorResult({
-          provider,
-          model,
-          status: 502,
-          startTime,
-          error: "ChatGPT Web image bytes expired before b64_json conversion",
-          requestBody,
-        });
-      }
-      images.push({ b64_json: cached.bytes.toString("base64") });
-    }
-  }
-
-  return saveImageSuccessResult({
+  const result = await fetchImageEndpoint(
+    url,
+    headers,
+    multipartBody as unknown as BodyInit,
     provider,
-    model,
-    startTime,
-    requestBody,
-    responseBody: { images_count: images.length },
-    images,
-  });
+    log,
+    { timeoutMs: getConfiguredTimeout() }
+  );
+
+  saveCallLog({
+    method: "POST",
+    path: "/v1/images/edits",
+    status: result.status || (result.success ? 200 : 502),
+    model: `${provider}/${model}`,
+    provider,
+    duration: Date.now() - startTime,
+    tokens: { prompt_tokens: 0, completion_tokens: 0 },
+    error: result.success
+      ? null
+      : typeof result.error === "string"
+        ? result.error.slice(0, 500)
+        : null,
+    requestBody: { model, prompt: prompt.slice(0, 200), size: size || "default", n: n || 1 },
+    responseBody: result.success ? { images_count: result.data?.data?.length || 0 } : null,
+  }).catch(() => {});
+
+  return result;
 }
 
 /**
- * Handle a multipart /v1/images/edits request for chatgpt-web. Open WebUI
- * uploads the prior image's bytes; we hash them and look up our cache.
+ * Handle OpenRouter's unified Image API reference-image flow.
  *
- * The hash match is reliable because Open WebUI's image-gen pipeline
- * downloads our /v1/chatgpt-web/image/<id> URL byte-for-byte and re-serves
- * those exact bytes through its own file store. When the user asks to edit
- * the image, OWUI uploads the same bytes back to us via multipart — same
- * hash, we find the conversation context, and drive the executor with a
- * synthetic chat thread that triggers continuation mode.
- *
- * No-match cases (cache evicted by TTL, or the user uploaded a foreign
- * image) get a clear 400. We can't actually edit an image we don't have a
- * conversation context for — chatgpt.com's image_gen tool needs the
- * original conversation node, and we don't have a path to upload bytes
- * directly.
+ * OpenRouter does not expose `/images/edits`; image-to-image requests use
+ * `POST /api/v1/images` with `input_references` containing data-URL images.
+ * Keep this separate from the generic multipart `/images/edits` forwarder,
+ * whose contract is used by custom OpenAI-compatible nodes (#10197).
  */
-export async function handleImageEdit({
-  provider,
+export async function handleOpenRouterImageEdit({
   model,
-  body,
-  imageBytes,
+  provider,
+  baseUrl,
   credentials,
+  prompt,
+  imageBytes,
+  imageMime,
+  size,
+  n = 1,
   log,
-  signal = null,
-  clientHeaders = null,
 }: {
-  provider: string;
   model: string;
-  body: Record<string, any>;
+  provider: string;
+  baseUrl: string;
+  credentials:
+    | {
+        apiKey?: string;
+        accessToken?: string;
+      }
+    | null
+    | undefined;
+  prompt: string;
   imageBytes: Buffer;
-  imageMime?: string; // accepted for symmetry with route layer; not used
-  credentials: any;
-  log: any;
-  signal?: AbortSignal | null;
-  clientHeaders?: Record<string, string> | null;
+  imageMime?: string | null;
+  size?: string | null;
+  n?: number;
+  log?: { info: (tag: string, message: string) => void } | null;
 }) {
   const startTime = Date.now();
-  const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
-  if (!prompt) {
-    return saveImageErrorResult({
-      provider,
-      model,
-      status: 400,
-      startTime,
-      error: "Prompt is required for image edit",
-    });
+  let url = baseUrl.trim();
+  while (url.endsWith("/")) url = url.slice(0, -1);
+  if (url.endsWith("/images/generations")) {
+    url = url.slice(0, -"/images/generations".length) + "/images";
+  } else if (!url.endsWith("/images")) {
+    url += "/images";
   }
 
-  if (!credentials?.apiKey) {
-    return saveImageErrorResult({
-      provider,
-      model,
-      status: 401,
-      startTime,
-      error: "ChatGPT Web credentials missing session cookie",
-    });
-  }
-
-  const imageHash = createHash("sha256").update(imageBytes).digest("hex");
-  const cached = findChatGptImageBySha256(imageHash);
-
-  const wantsBase64 = body.response_format === "b64_json";
-  const requestBody = {
+  const mime = imageMime || "image/png";
+  const upstreamBody: Record<string, unknown> = {
     model,
-    prompt: prompt.slice(0, 500),
-    size: body.size || undefined,
-    image_hash: imageHash.slice(0, 16),
-    image_bytes: imageBytes.length,
-    cached_match: Boolean(cached?.entry.context),
+    prompt,
+    input_references: [
+      {
+        type: "image_url",
+        image_url: {
+          url: `data:${mime};base64,${imageBytes.toString("base64")}`,
+        },
+      },
+    ],
+    n: n || 1,
   };
+  if (size) upstreamBody.size = size;
 
-  if (!cached?.entry.context) {
-    // chatgpt-web's image_gen tool can only edit an image when we continue
-    // the original conversation node. If we never generated this image (or
-    // its 30-minute TTL elapsed), there's no node to continue. Return a
-    // clear, actionable error — much better than silently spawning an
-    // unrelated image and confusing the user.
-    log?.warn?.(
-      "IMAGE",
-      `chatgpt-web edit: no cached match for sha256=${imageHash.slice(0, 16)} (bytes=${imageBytes.length}); returning 400`
-    );
-    return saveImageErrorResult({
-      provider,
-      model,
-      status: 400,
-      startTime,
-      error:
-        "chatgpt-web image edit only works for images recently generated through this OmniRoute instance " +
-        "(cache window: 30 minutes). Re-generate the image and try the edit immediately, or disable image-edit " +
-        "in your client to use plain chat-completion edit prompts instead.",
-      requestBody,
-    });
-  }
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  const token = credentials?.apiKey || credentials?.accessToken;
+  if (token) headers.Authorization = `Bearer ${token}`;
 
-  // Build a synthetic chat thread that surfaces the cached image URL on
-  // the assistant turn. The executor's parseOpenAIMessages picks up the
-  // URL, findCachedImageContext resolves it to {conversationId,
-  // parentMessageId}, and looksLikeImageEditRequest fires on the user
-  // prompt — together producing a continuation request that actually
-  // edits the saved image.
-  //
-  // The synthetic user prompt is anchored with both an edit verb AND an
-  // image-gen verb so the executor's heuristics fire regardless of what
-  // wording the caller used ("now make it brighter", "tweak this", ...):
-  //   - looksLikeImageEditRequest: matches "edit" + "image" within 120 chars
-  //   - looksLikeImageGenRequest:  matches "generate" + "image" within 40 chars
-  // Either match alone would set forImageGen, but covering both is cheap
-  // insurance for prompts that don't fit common phrasings.
-  const messages: Array<{ role: string; content: string }> = [
-    {
-      role: "assistant",
-      // The base URL is irrelevant — only the path is parsed by
-      // CACHED_IMAGE_URL_RE in the executor's findCachedImageContext.
-      content: `![image](http://internal/v1/chatgpt-web/image/${cached.id})`,
-    },
-    {
-      role: "user",
-      content: `Edit the image and generate the new image: ${prompt}`,
-    },
-  ];
+  log?.info(
+    "IMAGE",
+    `${provider}/${model} (reference edit) | prompt: "${prompt.slice(0, 60)}..." -> ${url}`
+  );
 
-  const executor = new ChatGptWebExecutor();
-  const result = await executor.execute({
-    model,
-    body: { messages },
-    stream: false,
-    credentials,
-    signal,
-    log,
-    clientHeaders,
-  });
-
-  const responseText = await result.response.text();
-  if (result.response.status >= 400) {
-    return saveImageErrorResult({
-      provider,
-      model,
-      status: result.response.status,
-      startTime,
-      error: responseText,
-      requestBody,
-    });
-  }
-
-  let content = "";
-  try {
-    const json = JSON.parse(responseText);
-    content = String(json?.choices?.[0]?.message?.content || "");
-  } catch {
-    content = responseText;
-  }
-
-  const urls = extractMarkdownImageUrls(content);
-  if (urls.length === 0) {
-    return saveImageErrorResult({
-      provider,
-      model,
-      status: 502,
-      startTime,
-      error: `ChatGPT Web edit completed without returning image markdown: ${content.slice(0, 300)}`,
-      requestBody,
-    });
-  }
-
-  const images: Array<{ url?: string; b64_json?: string }> = [];
-  for (const url of urls) {
-    if (!wantsBase64) {
-      images.push({ url });
-      continue;
-    }
-    const id = url.match(CHATGPT_WEB_IMAGE_ID_RE)?.[1];
-    const cachedNew = id ? getChatGptImage(id) : null;
-    if (!cachedNew) {
-      return saveImageErrorResult({
-        provider,
-        model,
-        status: 502,
-        startTime,
-        error: "ChatGPT Web image bytes expired before b64_json conversion",
-        requestBody,
-      });
-    }
-    images.push({ b64_json: cachedNew.bytes.toString("base64") });
-  }
-
-  return saveImageSuccessResult({
+  const result = await fetchImageEndpoint(
+    url,
+    headers,
+    JSON.stringify(upstreamBody),
     provider,
-    model,
-    startTime,
-    requestBody,
-    responseBody: { images_count: images.length, edit_match: Boolean(cached?.entry.context) },
-    images,
-  });
+    log,
+    { timeoutMs: getConfiguredTimeout() }
+  );
+
+  saveCallLog({
+    method: "POST",
+    path: "/v1/images/edits",
+    status: result.status || (result.success ? 200 : 502),
+    model: `${provider}/${model}`,
+    provider,
+    duration: Date.now() - startTime,
+    tokens: { prompt_tokens: 0, completion_tokens: 0 },
+    error: result.success
+      ? null
+      : typeof result.error === "string"
+        ? result.error.slice(0, 500)
+        : null,
+    requestBody: { model, prompt: prompt.slice(0, 200), size: size || "default", n: n || 1 },
+    responseBody: result.success ? { images_count: result.data?.data?.length || 0 } : null,
+  }).catch(() => {});
+
+  return result;
 }
 
 async function handleFalAIImageGeneration({
@@ -952,6 +1724,7 @@ async function handleFalAIImageGeneration({
 }) {
   const startTime = Date.now();
   const token = credentials.apiKey || credentials.accessToken;
+  const falModel = model.startsWith("fal-ai/") ? model : `fal-ai/${model}`;
   const { imageUrl, imageUrls } = extractImageInputs(body);
   const upstreamBody: Record<string, unknown> = {
     prompt: body.prompt,
@@ -997,7 +1770,7 @@ async function handleFalAIImageGeneration({
   }
 
   try {
-    const response = await fetch(`${providerConfig.baseUrl.replace(/\/$/, "")}/${model}`, {
+    const response = await fetch(`${providerConfig.baseUrl.replace(/\/$/, "")}/${falModel}`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -1021,7 +1794,7 @@ async function handleFalAIImageGeneration({
     }
 
     const payload = await response.json();
-    const images = await normalizeProviderImagePayload(payload, body, log);
+    const images = await normalizeProviderImagePayload(payload, body, log, "b64_json");
     return saveImageSuccessResult({
       provider,
       model,
@@ -1038,7 +1811,7 @@ async function handleFalAIImageGeneration({
       model,
       status: 502,
       startTime,
-      error: `Image provider error: ${err.message}`,
+      error: `Image provider error: ${sanitizeErrorMessage((err as Error).message || err)}`,
     });
   }
 }
@@ -1211,7 +1984,7 @@ async function handleStabilityAIImageGeneration({
       payload = { image: buffer.toString("base64") };
     }
 
-    const images = await normalizeProviderImagePayload(payload, body, log);
+    const images = await normalizeProviderImagePayload(payload, body, log, "b64_json");
     return saveImageSuccessResult({
       provider,
       model,
@@ -1228,126 +2001,7 @@ async function handleStabilityAIImageGeneration({
       model,
       status: 502,
       startTime,
-      error: `Image provider error: ${err.message}`,
-    });
-  }
-}
-
-async function handleBlackForestLabsImageGeneration({
-  model,
-  provider,
-  providerConfig,
-  body,
-  credentials,
-  log,
-}) {
-  const startTime = Date.now();
-  const token = credentials.apiKey || credentials.accessToken;
-  const endpoint = BFL_MODEL_ENDPOINTS[model];
-
-  if (!endpoint) {
-    return {
-      success: false,
-      status: 400,
-      error: `Unsupported Black Forest Labs image model: ${model}`,
-    };
-  }
-
-  const { imageUrl, maskUrl } = extractImageInputs(body);
-  const upstreamBody: Record<string, unknown> = {
-    prompt: body.prompt,
-    output_format: normalizeRequestedImageFormat(body, "png"),
-  };
-
-  try {
-    if (BFL_EDIT_MODELS.has(model) && imageUrl) {
-      upstreamBody.input_image = (await resolveImageSource(imageUrl)).base64;
-    } else if (imageUrl && isHttpUrl(imageUrl)) {
-      upstreamBody.image_url = imageUrl;
-    }
-
-    if (maskUrl && (model === "flux-pro-1.0-fill" || model === "flux-kontext-pro")) {
-      upstreamBody.mask = (await resolveImageSource(maskUrl)).base64;
-    }
-
-    if (model === "flux-kontext-pro" || model === "flux-kontext-max") {
-      upstreamBody.aspect_ratio = body.aspect_ratio || mapImageSize(body.size);
-    } else if (typeof body.size === "string" && body.size.includes("x")) {
-      const { width, height } = parseSizeToDimensions(body.size, 1024);
-      upstreamBody.width = width;
-      upstreamBody.height = height;
-    }
-
-    if (body.seed !== undefined) upstreamBody.seed = body.seed;
-    if (body.n !== undefined && model.includes("ultra"))
-      upstreamBody.num_images = Number(body.n) || 1;
-    if (body.quality === "hd" && model.includes("ultra")) upstreamBody.raw = true;
-    if (body.left !== undefined) upstreamBody.left = body.left;
-    if (body.right !== undefined) upstreamBody.right = body.right;
-    if (body.top !== undefined) upstreamBody.top = body.top;
-    if (body.bottom !== undefined) upstreamBody.bottom = body.bottom;
-    if (body.steps !== undefined) upstreamBody.steps = body.steps;
-    if (body.guidance !== undefined) upstreamBody.guidance = body.guidance;
-    if (body.grow_mask !== undefined) upstreamBody.grow_mask = body.grow_mask;
-    if (body.safety_tolerance !== undefined) upstreamBody.safety_tolerance = body.safety_tolerance;
-
-    if (log) {
-      const promptPreview = String(body.prompt ?? "").slice(0, 60);
-      log.info("IMAGE", `${provider}/${model} (black-forest-labs) | prompt: "${promptPreview}..."`);
-    }
-
-    const response = await fetch(`${providerConfig.baseUrl.replace(/\/$/, "")}${endpoint}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        "x-key": token,
-      },
-      body: JSON.stringify(upstreamBody),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      if (log)
-        log.error("IMAGE", `${provider} error ${response.status}: ${errorText.slice(0, 200)}`);
-      return saveImageErrorResult({
-        provider,
-        model,
-        status: response.status,
-        startTime,
-        error: errorText,
-        requestBody: upstreamBody,
-      });
-    }
-
-    const initialPayload = await response.json();
-    const finalPayload = initialPayload.polling_url
-      ? await pollBlackForestLabsResult({
-          pollingUrl: initialPayload.polling_url,
-          token,
-          body,
-          log,
-        })
-      : initialPayload;
-
-    const images = await normalizeProviderImagePayload(finalPayload, body, log);
-    return saveImageSuccessResult({
-      provider,
-      model,
-      startTime,
-      requestBody: upstreamBody,
-      responseBody: { images_count: images.length },
-      created: finalPayload.created,
-      images,
-    });
-  } catch (err) {
-    if (log) log.error("IMAGE", `${provider} fetch error: ${err.message}`);
-    return saveImageErrorResult({
-      provider,
-      model,
-      status: 502,
-      startTime,
-      error: `Image provider error: ${err.message}`,
+      error: `Image provider error: ${sanitizeErrorMessage((err as Error).message || err)}`,
     });
   }
 }
@@ -1405,7 +2059,7 @@ async function handleRecraftImageGeneration({
     }
 
     const payload = await response.json();
-    const images = await normalizeProviderImagePayload(payload, body, log);
+    const images = await normalizeProviderImagePayload(payload, body, log, "url");
     return saveImageSuccessResult({
       provider,
       model,
@@ -1422,7 +2076,7 @@ async function handleRecraftImageGeneration({
       model,
       status: 502,
       startTime,
-      error: `Image provider error: ${err.message}`,
+      error: `Image provider error: ${sanitizeErrorMessage((err as Error).message || err)}`,
     });
   }
 }
@@ -1510,51 +2164,12 @@ async function handleTopazImageGeneration({
       model,
       status: 502,
       startTime,
-      error: `Image provider error: ${err.message}`,
+      error: `Image provider error: ${sanitizeErrorMessage((err as Error).message || err)}`,
     });
   }
 }
 
-async function pollBlackForestLabsResult({ pollingUrl, token, body, log }) {
-  const timeoutMs = normalizePositiveNumber(body.timeout_ms, 300000);
-  const pollIntervalMs = normalizePositiveNumber(body.poll_interval_ms, 1500);
-  const deadline = Date.now() + timeoutMs;
-
-  while (Date.now() < deadline) {
-    const response = await fetch(pollingUrl, {
-      method: "GET",
-      headers: {
-        "x-key": token,
-      },
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`BFL polling failed (${response.status}): ${errorText}`);
-    }
-
-    const payload = await response.json();
-    const status = payload?.status;
-
-    if (status === "Ready") {
-      return payload;
-    }
-
-    if (BFL_FAILURE_STATUSES.has(status)) {
-      throw new Error(`BFL image generation failed: ${status}`);
-    }
-
-    if (log) {
-      log.info("IMAGE", `black-forest-labs polling status: ${String(status || "Pending")}`);
-    }
-
-    await sleep(pollIntervalMs);
-  }
-
-  throw new Error(`BFL polling timed out after ${timeoutMs}ms`);
-}
-
-function extractImageInputs(body) {
+export function extractImageInputs(body) {
   const imageUrls = [];
   const seen = new Set();
 
@@ -1600,7 +2215,7 @@ function extractImageInputs(body) {
   };
 }
 
-async function resolveImageSource(source) {
+export async function resolveImageSource(source) {
   if (typeof source !== "string" || source.trim().length === 0) {
     throw new Error("Invalid image source");
   }
@@ -1617,7 +2232,8 @@ async function resolveImageSource(source) {
   }
 
   if (isHttpUrl(trimmed)) {
-    const remoteImage = await fetchRemoteImage(trimmed);
+    // Caller-input URL — public-only + DNS-pinned policy lives in fetchUntrustedRemoteImage.
+    const remoteImage = await fetchUntrustedRemoteImage(trimmed);
     return {
       buffer: remoteImage.buffer,
       base64: remoteImage.buffer.toString("base64"),
@@ -1632,7 +2248,7 @@ async function resolveImageSource(source) {
   };
 }
 
-function parseSizeToDimensions(size, fallback = 1024) {
+export function parseSizeToDimensions(size, fallback = 1024) {
   if (typeof size !== "string" || !size.includes("x")) {
     return { width: fallback, height: fallback };
   }
@@ -1646,7 +2262,7 @@ function parseSizeToDimensions(size, fallback = 1024) {
   };
 }
 
-function normalizeRequestedImageFormat(
+export function normalizeRequestedImageFormat(
   body,
   fallback = "png",
   allowedFormats = ["jpeg", "png", "webp"]
@@ -1666,7 +2282,7 @@ function normalizeRequestedImageFormat(
   return fallback;
 }
 
-function mapFalImageSize(size, fallback = "square_hd") {
+export function mapFalImageSize(size, fallback = "square_hd") {
   if (typeof size !== "string") return fallback;
   if (FAL_PRESET_SIZES[size]) return FAL_PRESET_SIZES[size];
   if (size.includes("x")) {
@@ -1697,7 +2313,7 @@ function shouldIncludeStabilityMask(model) {
   ]).has(model);
 }
 
-async function normalizeProviderImagePayload(payload, body, log) {
+export async function normalizeProviderImagePayload(payload, body, log, defaultFormat) {
   const candidates = [];
 
   const pushCandidate = (value) => {
@@ -1723,7 +2339,7 @@ async function normalizeProviderImagePayload(payload, body, log) {
 
   const normalized = [];
   for (const candidate of candidates) {
-    const item = await normalizeProviderImageCandidate(candidate, body);
+    const item = await normalizeProviderImageCandidate(candidate, body, defaultFormat);
     if (item) normalized.push(item);
   }
 
@@ -1737,8 +2353,8 @@ async function normalizeProviderImagePayload(payload, body, log) {
   return normalized;
 }
 
-async function normalizeProviderImageCandidate(candidate, body) {
-  const wantsBase64 = body?.response_format === "b64_json";
+async function normalizeProviderImageCandidate(candidate, body, defaultFormat) {
+  const wantsBase64 = body?.response_format === "b64_json" || defaultFormat === "b64_json";
   let url = null;
   let b64 = null;
 
@@ -1784,12 +2400,12 @@ function firstString(...values) {
   return null;
 }
 
-function isHttpUrl(value) {
+export function isHttpUrl(value) {
   return typeof value === "string" && /^https?:\/\//i.test(value);
 }
 
 /**
- * Codex image generation — translate DALL-E-style /v1/images/generations
+ * Codex image generation — translate GPT-Image-style /v1/images/generations
  * request into a /v1/responses call with the `image_generation` hosted tool,
  * parse the SSE stream, and return the base64 PNG in OpenAI image response shape.
  *
@@ -1825,13 +2441,31 @@ export function extractImageGenerationCalls(
 }
 
 // The image_generation hosted tool accepts { "auto" | "low" | "medium" | "high" }
-// for `quality`. DALL-E clients often send "standard" / "hd". Map legacy values
+// for `quality`. Legacy image clients often send "standard" / "hd". Map those values
 // so OpenWebUI's quality dropdown doesn't silently get rejected upstream.
-function mapDalleQualityToImageTool(value: string): string {
+export function mapLegacyImageQualityToImageTool(value: string): string {
   const normalized = value.toLowerCase();
   if (normalized === "standard") return "medium";
   if (normalized === "hd") return "high";
   return normalized;
+}
+
+// The Codex backend answers 503 when an inline reference image is large (seen above ~400 KB);
+// a 1024px long edge keeps edits working without changing what the model sees in practice.
+const CODEX_REFERENCE_MAX_BYTES = 400_000;
+const CODEX_REFERENCE_MAX_LONG_EDGE = 1024;
+
+export async function shrinkCodexReferenceImage(image: {
+  bytes: Buffer;
+  mime?: string;
+}): Promise<{ bytes: Buffer; mime: string }> {
+  const mime = image.mime || "image/png";
+  if (image.bytes.length <= CODEX_REFERENCE_MAX_BYTES) return { bytes: image.bytes, mime };
+  const out = await normalizeImageBuffer(image.bytes, {
+    maxLongEdge: CODEX_REFERENCE_MAX_LONG_EDGE,
+  });
+  if (!out.resized) return { bytes: image.bytes, mime };
+  return { bytes: out.buffer, mime: out.mime || mime };
 }
 
 async function handleCodexImageGeneration({
@@ -1841,6 +2475,9 @@ async function handleCodexImageGeneration({
   body,
   credentials,
   log,
+  referenceImages = [],
+  signal = null,
+  logPath = "/v1/images/generations",
 }) {
   const startTime = Date.now();
   const prompt = typeof body.prompt === "string" ? body.prompt : "";
@@ -1851,6 +2488,7 @@ async function handleCodexImageGeneration({
       status: 400,
       startTime,
       error: "Prompt is required for Codex image generation",
+      path: logPath,
     });
   }
 
@@ -1859,7 +2497,7 @@ async function handleCodexImageGeneration({
   if (log && requestedCount > 1) {
     log.warn(
       "IMAGE",
-      `Codex hosted image_generation returns one image per call; requested n=${requestedCount} will run sequentially`
+      `Codex hosted image_generation returns one image per call; requested n=${requestedCount} will fan out in parallel`
     );
   }
 
@@ -1871,6 +2509,19 @@ async function handleCodexImageGeneration({
       status: 401,
       startTime,
       error: "Codex credentials missing accessToken — reconnect the Codex provider",
+      path: logPath,
+    });
+  }
+
+  if (isCodexFreePlan(credentials?.providerSpecificData)) {
+    return saveImageErrorResult({
+      provider,
+      model,
+      status: 403,
+      startTime,
+      error: "Codex image_generation is unavailable on free-plan accounts",
+      path: logPath,
+      retryable: true,
     });
   }
 
@@ -1880,33 +2531,63 @@ async function handleCodexImageGeneration({
     !Array.isArray(credentials.providerSpecificData)
       ? (credentials.providerSpecificData as Record<string, unknown>).workspaceId
       : undefined;
-
-  // Forward size/quality from the DALL-E-style body into the hosted tool so
-  // OpenWebUI's size/quality selectors actually take effect. Everything else
-  // (model, n, background, moderation, output_compression) is left to the
-  // Codex backend's defaults — today that's `gpt-image-2`.
+  if (codexImages.isCodexImagesApiModel(model)) {
+    // prettier-ignore
+    return codexImages.handleCodexImagesApi({ model, provider, baseUrl: providerConfig.baseUrl, body, token, workspaceId, requestedCount, referenceImages, startTime, log, signal, logPath });
+  }
   const toolConfig: Record<string, unknown> = { type: "image_generation", output_format: "png" };
+  if (referenceImages.length > 0) toolConfig.action = "edit";
   if (typeof body.size === "string" && body.size.trim()) {
     toolConfig.size = body.size.trim();
   }
   if (typeof body.quality === "string" && body.quality.trim()) {
-    toolConfig.quality = mapDalleQualityToImageTool(body.quality.trim());
+    toolConfig.quality = mapLegacyImageQualityToImageTool(body.quality.trim());
+  }
+  // The hosted image_generation tool accepts `background` ("transparent" | "opaque" | "auto");
+  // without it a logo/sticker request always comes back on an opaque canvas.
+  if (typeof body.background === "string" && body.background.trim()) {
+    toolConfig.background = body.background.trim();
+  }
+
+  const inputContent: Array<Record<string, unknown>> = [{ type: "input_text", text: prompt }];
+  for (const image of referenceImages) {
+    const reference = await shrinkCodexReferenceImage(image);
+    inputContent.push({
+      type: "input_image",
+      image_url: `data:${reference.mime};base64,${reference.bytes.toString("base64")}`,
+    });
   }
 
   const upstreamBody: Record<string, unknown> = {
     model,
     instructions:
-      "You must call the image_generation tool exactly once to fulfill the user's request. Do not add narration.",
+      referenceImages.length > 0
+        ? `You must call the image_generation tool exactly once to edit the supplied ${referenceImages.length === 1 ? "reference image" : "reference images"}. Treat all supplied images as references for the user's requested composition or style. Do not add narration.`
+        : "You must call the image_generation tool exactly once to fulfill the user's request. Do not add narration.",
     input: [
       {
         role: "user",
-        content: [{ type: "input_text", text: prompt }],
+        content: inputContent,
       },
     ],
     tools: [toolConfig],
     stream: true,
     store: false,
   };
+  const requestBodyForLog =
+    referenceImages.length > 0
+      ? {
+          model,
+          prompt_chars: prompt.length,
+          reference_images: referenceImages.map((image) => ({
+            mime: image.mime || "image/png",
+            bytes: image.bytes.length,
+          })),
+          tools: [toolConfig],
+          stream: true,
+          store: false,
+        }
+      : upstreamBody;
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -1922,61 +2603,88 @@ async function handleCodexImageGeneration({
   }
 
   if (log) {
-    log.info(
-      "IMAGE",
-      `${provider}/${model} (codex-responses) | prompt: "${prompt.slice(0, 60)}..."`
-    );
+    const promptSummary =
+      referenceImages.length > 0 ? `${prompt.length} chars` : `"${prompt.slice(0, 60)}..."`;
+    log.info("IMAGE", `${provider}/${model} (codex-responses) | prompt: ${promptSummary}`);
   }
 
-  const collected: Array<{ b64_json: string; revised_prompt?: string }> = [];
-  for (let i = 0; i < requestedCount; i++) {
+  const fetchOneImage = async () => {
     let response: Response;
     try {
       response = await fetch(providerConfig.baseUrl, {
         method: "POST",
         headers,
         body: JSON.stringify(upstreamBody),
+        signal,
       });
     } catch (err) {
-      if (log) log.error("IMAGE", `${provider} fetch error: ${(err as Error).message}`);
-      return saveImageErrorResult({
-        provider,
-        model,
-        status: 502,
-        startTime,
-        error: `Image provider error: ${(err as Error).message}`,
-        requestBody: upstreamBody,
-      });
+      const message = sanitizeErrorMessage(err);
+      if (log) log.error("IMAGE", `${provider} fetch error: ${message}`);
+      return {
+        ok: false as const,
+        error: {
+          provider,
+          model,
+          status: 502,
+          startTime,
+          error: `Image provider error: ${message}`,
+          requestBody: requestBodyForLog,
+          path: logPath,
+        },
+      };
     }
 
     if (!response.ok) {
       const errorText = await response.text();
-      if (log)
-        log.error("IMAGE", `${provider} error ${response.status}: ${errorText.slice(0, 200)}`);
-      return saveImageErrorResult({
-        provider,
-        model,
-        status: response.status,
-        startTime,
-        error: errorText,
-        requestBody: upstreamBody,
-      });
+      const safeError = sanitizeImageProviderError(errorText);
+      const safeErrorLog =
+        typeof safeError === "string" ? safeError : JSON.stringify(safeError ?? {});
+      if (log) log.error("IMAGE", `${provider} error ${response.status}: ${safeErrorLog}`);
+      const retryable = isCodexChatGptModelAccessError(response.status, errorText, model);
+      return {
+        ok: false as const,
+        error: {
+          provider,
+          model,
+          status: response.status,
+          startTime,
+          error: safeError,
+          requestBody: requestBodyForLog,
+          path: logPath,
+          ...(retryable ? { retryable: true } : {}),
+        },
+      };
     }
 
     const rawSSE = await response.text();
     const items = extractImageGenerationCalls(rawSSE);
     if (items.length === 0) {
-      return saveImageErrorResult({
-        provider,
-        model,
-        status: 502,
-        startTime,
-        error:
-          "Codex completed without producing an image_generation_call — the model may have declined the tool",
-        requestBody: upstreamBody,
-      });
+      return {
+        ok: false as const,
+        error: {
+          provider,
+          model,
+          status: 502,
+          startTime,
+          error:
+            "Codex completed without producing an image_generation_call — the model may have declined the tool",
+          requestBody: requestBodyForLog,
+          path: logPath,
+        },
+      };
     }
-    for (const item of items) {
+
+    return { ok: true as const, items };
+  };
+
+  const imageResults = await Promise.all(
+    Array.from({ length: requestedCount }, () => fetchOneImage())
+  );
+
+  const collected: Array<{ b64_json: string; revised_prompt?: string }> = [];
+  for (const imageResult of imageResults) {
+    if (!imageResult.ok) return saveImageErrorResult(imageResult.error);
+    for (const item of imageResult.items) {
       collected.push({
         b64_json: item.b64,
         ...(item.revisedPrompt ? { revised_prompt: item.revisedPrompt } : {}),
@@ -1984,7 +2692,11 @@ async function handleCodexImageGeneration({
     }
   }
 
-  const wantsUrl = body.response_format !== "b64_json";
+  // OpenAI returns b64_json for the gpt-image-* family and reserves `url` for
+  // fetchable HTTPS links, so clients that omit response_format (Codex CLI's
+  // built-in image_gen among them) expect the bytes in b64_json. Only emit the
+  // data: URI when the caller explicitly asks for `url` (#12268).
+  const wantsUrl = body.response_format === "url";
   const data = wantsUrl
     ? collected.map((item) => ({
         url: `data:image/png;base64,${item.b64_json}`,
@@ -1996,13 +2708,60 @@ async function handleCodexImageGeneration({
     provider,
     model,
     startTime,
-    requestBody: upstreamBody,
+    requestBody: requestBodyForLog,
     responseBody: { images_count: data.length },
     images: data,
+    path: logPath,
   });
 }
 
-function saveImageSuccessResult({
+type CodexImageEditResult =
+  | { success: true; data: { created: number; data: Array<Record<string, unknown>> } }
+  | { success: false; status: number; error: unknown };
+
+/**
+ * Run a stateless Codex reference-image edit through the native Responses hosted tool.
+ * This deliberately reuses the text-to-image implementation so OAuth headers, SSE parsing,
+ * response formatting, and error handling cannot drift between generations and edits.
+ */
+export async function handleCodexImageEdit({
+  model,
+  provider,
+  providerConfig,
+  body,
+  referenceImages,
+  credentials,
+  log,
+  signal = null,
+}: {
+  model: string;
+  provider: string;
+  providerConfig: unknown;
+  body: Record<string, unknown>;
+  referenceImages: Array<{ bytes: Buffer; mime: string }>;
+  credentials: unknown;
+  log: {
+    info: (tag: string, message: string) => void;
+    warn: (tag: string, message: string) => void;
+    error: (tag: string, message: string) => void;
+  } | null;
+  signal?: AbortSignal | null;
+}): Promise<CodexImageEditResult> {
+  const result = await handleCodexImageGeneration({
+    model,
+    provider,
+    providerConfig,
+    body: { ...body, n: 1 },
+    credentials,
+    log,
+    referenceImages,
+    signal,
+    logPath: "/v1/images/edits",
+  });
+  return result as CodexImageEditResult;
+}
+
+export function saveImageSuccessResult({
   provider,
   model,
   startTime,
@@ -2010,10 +2769,11 @@ function saveImageSuccessResult({
   responseBody = null,
   created = null,
   images,
+  path = "/v1/images/generations",
 }) {
   saveCallLog({
     method: "POST",
-    path: "/v1/images/generations",
+    path,
     status: 200,
     model: `${provider}/${model}`,
     provider,
@@ -2031,15 +2791,39 @@ function saveImageSuccessResult({
   };
 }
 
-function saveImageErrorResult({ provider, model, status, startTime, error, requestBody = null }) {
+export function saveImageErrorResult({
+  provider,
+  model,
+  status,
+  startTime,
+  error,
+  requestBody = null,
+  path = "/v1/images/generations",
+  // #8307: opt-in signal for executeImageWithCredentialFallback — set by a
+  // provider handler when the failure is account/session-specific (expired
+  // or blocked credentials) rather than a generic request/provider error, so
+  // the retry loop tries the next eligible account even when the upstream
+  // status isn't a plain 401. Defaults to unset (existing 401-only behavior
+  // for every other provider is unchanged).
+  retryable = undefined,
+}: {
+  provider: string;
+  model: string;
+  status: number;
+  startTime: number;
+  error: unknown;
+  requestBody?: unknown;
+  path?: string;
+  retryable?: boolean;
+}) {
   saveCallLog({
     method: "POST",
-    path: "/v1/images/generations",
+    path,
     status,
     model: `${provider}/${model}`,
     provider,
     duration: Date.now() - startTime,
-    error: typeof error === "string" ? error.slice(0, 500) : String(error).slice(0, 500),
+    error: stringifyImageErrorForLog(error).slice(0, 500),
     requestBody,
   }).catch(() => {});
 
@@ -2047,151 +2831,13 @@ function saveImageErrorResult({ provider, model, status, startTime, error, reque
     success: false,
     status,
     error,
+    ...(retryable !== undefined ? { retryable } : {}),
   };
-}
-
-/**
- * Fetch a single image endpoint and normalize response
- */
-async function fetchImageEndpoint(url, headers, body, provider, log) {
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers,
-      body,
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      if (log) {
-        log.error("IMAGE", `${provider} error ${response.status}: ${errorText.slice(0, 200)}`);
-      }
-      return {
-        success: false,
-        status: response.status,
-        error: errorText,
-      };
-    }
-
-    const data = await response.json();
-
-    // Normalize response to OpenAI format
-    return {
-      success: true,
-      data: {
-        created: data.created || Math.floor(Date.now() / 1000),
-        data: data.data || [],
-      },
-    };
-  } catch (err) {
-    if (log) {
-      log.error("IMAGE", `${provider} fetch error: ${err.message}`);
-    }
-    return {
-      success: false,
-      status: 502,
-      error: `Image provider error: ${err.message}`,
-    };
-  }
 }
 
 /**
  * Handle Hyperbolic image generation
  * Uses { model_name, prompt, height, width } and returns { images: [{ image: base64 }] }
- */
-async function handleHyperbolicImageGeneration({
-  model,
-  provider,
-  providerConfig,
-  body,
-  credentials,
-  log,
-}) {
-  const startTime = Date.now();
-  const token = credentials.apiKey || credentials.accessToken;
-
-  const [width, height] = (body.size || "1024x1024").split("x").map(Number);
-
-  const upstreamBody = {
-    model_name: model,
-    prompt: body.prompt,
-    height: height || 1024,
-    width: width || 1024,
-    backend: "auto",
-  };
-
-  if (log) {
-    const promptPreview = String(body.prompt ?? "").slice(0, 60);
-    log.info("IMAGE", `${provider}/${model} (hyperbolic) | prompt: "${promptPreview}..."`);
-  }
-
-  try {
-    const response = await fetch(providerConfig.baseUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify(upstreamBody),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      if (log)
-        log.error("IMAGE", `${provider} error ${response.status}: ${errorText.slice(0, 200)}`);
-
-      saveCallLog({
-        method: "POST",
-        path: "/v1/images/generations",
-        status: response.status,
-        model: `${provider}/${model}`,
-        provider,
-        duration: Date.now() - startTime,
-        error: errorText.slice(0, 500),
-      }).catch(() => {});
-
-      return { success: false, status: response.status, error: errorText };
-    }
-
-    const data = await response.json();
-    // Transform { images: [{ image: base64 }] } → OpenAI format
-    const images = (data.images || []).map((img) => ({
-      b64_json: img.image,
-      revised_prompt: body.prompt,
-    }));
-
-    saveCallLog({
-      method: "POST",
-      path: "/v1/images/generations",
-      status: 200,
-      model: `${provider}/${model}`,
-      provider,
-      duration: Date.now() - startTime,
-      responseBody: { images_count: images.length },
-    }).catch(() => {});
-
-    return {
-      success: true,
-      data: { created: Math.floor(Date.now() / 1000), data: images },
-    };
-  } catch (err) {
-    if (log) log.error("IMAGE", `${provider} fetch error: ${err.message}`);
-    saveCallLog({
-      method: "POST",
-      path: "/v1/images/generations",
-      status: 502,
-      model: `${provider}/${model}`,
-      provider,
-      duration: Date.now() - startTime,
-      error: err.message,
-    }).catch(() => {});
-    return { success: false, status: 502, error: `Image provider error: ${err.message}` };
-  }
-}
-
-/**
- * Handle NanoBanana image generation
- * NanoBanana is async (submit task -> poll status -> return final image URL/base64)
  */
 async function handleNanoBananaImageGeneration({
   model,
@@ -2439,7 +3085,11 @@ async function handleNanoBananaImageGeneration({
       duration: Date.now() - startTime,
       error: err.message,
     }).catch(() => {});
-    return { success: false, status: 502, error: `Image provider error: ${err.message}` };
+    return {
+      success: false,
+      status: 502,
+      error: `Image provider error: ${sanitizeErrorMessage((err as Error).message || err)}`,
+    };
   }
 }
 
@@ -2465,7 +3115,7 @@ function normalizeNanoBananaSyncPayload(data, prompt) {
   return { data: images.filter(Boolean) };
 }
 
-async function normalizeNanoBananaTaskResult(taskData, body, log) {
+export async function normalizeNanoBananaTaskResult(taskData, body, log) {
   const response = taskData?.response || {};
 
   const urlCandidates = [
@@ -2503,7 +3153,9 @@ async function normalizeNanoBananaTaskResult(taskData, body, log) {
 
     if (urlCandidates.length > 0) {
       const firstUrl = urlCandidates[0];
-      const remoteImage = await fetchRemoteImage(firstUrl);
+      // Upstream-supplied result URL, not an OmniRoute-controlled host — public-only +
+      // DNS-pinned policy lives in fetchUntrustedRemoteImage.
+      const remoteImage = await fetchUntrustedRemoteImage(firstUrl);
       const base64 = remoteImage.buffer.toString("base64");
       return [{ b64_json: base64, revised_prompt: body.prompt }];
     }
@@ -2540,14 +3192,10 @@ function inferResolutionFromSize(size) {
   return "4K";
 }
 
-function normalizePositiveNumber(value, fallback) {
+export function normalizePositiveNumber(value, fallback) {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return fallback;
   return Math.floor(n);
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
@@ -2555,317 +3203,3 @@ function sleep(ms) {
  * POST {baseUrl} with { prompt, negative_prompt, width, height, steps }
  * Response: { images: ["base64..."] }
  */
-async function handleSDWebUIImageGeneration({ model, provider, providerConfig, body, log }) {
-  const startTime = Date.now();
-  const [width, height] = (body.size || "512x512").split("x").map(Number);
-
-  const upstreamBody = {
-    prompt: body.prompt,
-    negative_prompt: body.negative_prompt || "",
-    width: width || 512,
-    height: height || 512,
-    steps: body.steps || 20,
-    cfg_scale: body.cfg_scale || 7,
-    sampler_name: body.sampler || "Euler a",
-    batch_size: body.n || 1,
-    override_settings: {
-      sd_model_checkpoint: model,
-    },
-  };
-
-  if (log) {
-    const promptPreview = String(body.prompt ?? "").slice(0, 60);
-    log.info("IMAGE", `${provider}/${model} (sdwebui) | prompt: "${promptPreview}..."`);
-  }
-
-  try {
-    const response = await fetch(providerConfig.baseUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(upstreamBody),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      if (log)
-        log.error("IMAGE", `${provider} error ${response.status}: ${errorText.slice(0, 200)}`);
-
-      saveCallLog({
-        method: "POST",
-        path: "/v1/images/generations",
-        status: response.status,
-        model: `${provider}/${model}`,
-        provider,
-        duration: Date.now() - startTime,
-        error: errorText.slice(0, 500),
-      }).catch(() => {});
-
-      return { success: false, status: response.status, error: errorText };
-    }
-
-    const data = await response.json();
-    // SD WebUI returns { images: ["base64...", ...] }
-    const images = (data.images || []).map((b64) => ({
-      b64_json: b64,
-      revised_prompt: body.prompt,
-    }));
-
-    saveCallLog({
-      method: "POST",
-      path: "/v1/images/generations",
-      status: 200,
-      model: `${provider}/${model}`,
-      provider,
-      duration: Date.now() - startTime,
-      responseBody: { images_count: images.length },
-    }).catch(() => {});
-
-    return {
-      success: true,
-      data: { created: Math.floor(Date.now() / 1000), data: images },
-    };
-  } catch (err) {
-    if (log) log.error("IMAGE", `${provider} sdwebui error: ${err.message}`);
-    saveCallLog({
-      method: "POST",
-      path: "/v1/images/generations",
-      status: 502,
-      model: `${provider}/${model}`,
-      provider,
-      duration: Date.now() - startTime,
-      error: err.message,
-    }).catch(() => {});
-    return { success: false, status: 502, error: `Image provider error: ${err.message}` };
-  }
-}
-
-/**
- * Handle ComfyUI image generation (local, no auth)
- * Submits a txt2img workflow, polls for completion, fetches output
- */
-async function handleComfyUIImageGeneration({ model, provider, providerConfig, body, log }) {
-  const startTime = Date.now();
-  const [width, height] = (body.size || "1024x1024").split("x").map(Number);
-
-  // Default txt2img workflow template for ComfyUI
-  const workflow = {
-    "3": {
-      class_type: "KSampler",
-      inputs: {
-        seed: parseInt(randomUUID().replace(/-/g, "").substring(0, 8), 16) % 2 ** 32,
-        steps: body.steps || 20,
-        cfg: body.cfg_scale || 7,
-        sampler_name: "euler",
-        scheduler: "normal",
-        denoise: 1,
-        model: ["4", 0],
-        positive: ["6", 0],
-        negative: ["7", 0],
-        latent_image: ["5", 0],
-      },
-    },
-    "4": {
-      class_type: "CheckpointLoaderSimple",
-      inputs: { ckpt_name: model },
-    },
-    "5": {
-      class_type: "EmptyLatentImage",
-      inputs: { width: width || 1024, height: height || 1024, batch_size: body.n || 1 },
-    },
-    "6": {
-      class_type: "CLIPTextEncode",
-      inputs: { text: body.prompt, clip: ["4", 1] },
-    },
-    "7": {
-      class_type: "CLIPTextEncode",
-      inputs: { text: body.negative_prompt || "", clip: ["4", 1] },
-    },
-    "8": {
-      class_type: "VAEDecode",
-      inputs: { samples: ["3", 0], vae: ["4", 2] },
-    },
-    "9": {
-      class_type: "SaveImage",
-      inputs: { filename_prefix: "omniroute", images: ["8", 0] },
-    },
-  };
-
-  if (log) {
-    const promptPreview = String(body.prompt ?? "").slice(0, 60);
-    log.info("IMAGE", `${provider}/${model} (comfyui) | prompt: "${promptPreview}..."`);
-  }
-
-  try {
-    const promptId = await submitComfyWorkflow(providerConfig.baseUrl, workflow);
-    const historyEntry = await pollComfyResult(providerConfig.baseUrl, promptId);
-    const outputFiles = extractComfyOutputFiles(historyEntry);
-
-    const images = [];
-    for (const file of outputFiles) {
-      const buffer = await fetchComfyOutput(
-        providerConfig.baseUrl,
-        file.filename,
-        file.subfolder,
-        file.type
-      );
-      const base64 = Buffer.from(buffer).toString("base64");
-      images.push({ b64_json: base64, revised_prompt: body.prompt });
-    }
-
-    saveCallLog({
-      method: "POST",
-      path: "/v1/images/generations",
-      status: 200,
-      model: `${provider}/${model}`,
-      provider,
-      duration: Date.now() - startTime,
-      responseBody: { images_count: images.length },
-    }).catch(() => {});
-
-    return {
-      success: true,
-      data: { created: Math.floor(Date.now() / 1000), data: images },
-    };
-  } catch (err) {
-    if (log) log.error("IMAGE", `${provider} comfyui error: ${err.message}`);
-    saveCallLog({
-      method: "POST",
-      path: "/v1/images/generations",
-      status: 502,
-      model: `${provider}/${model}`,
-      provider,
-      duration: Date.now() - startTime,
-      error: err.message,
-    }).catch(() => {});
-    return { success: false, status: 502, error: `Image provider error: ${err.message}` };
-  }
-}
-
-type Imagen3ImageGenArgs = {
-  model: string;
-  provider: string;
-  providerConfig: { baseUrl: string };
-  body: { prompt?: string; size?: string; n?: number };
-  credentials: { apiKey?: string; accessToken?: string };
-  log?: {
-    info?: (tag: string, msg: string) => void;
-    error?: (tag: string, msg: string) => void;
-  } | null;
-};
-
-type Imagen3NormalizedImage = {
-  b64_json?: unknown;
-  url?: unknown;
-  revised_prompt?: string;
-};
-
-/**
- * Handle Imagen 3 image generation
- */
-async function handleImagen3ImageGeneration({
-  model,
-  provider,
-  providerConfig,
-  body,
-  credentials,
-  log,
-}: Imagen3ImageGenArgs) {
-  const startTime = Date.now();
-  const token = credentials.apiKey || credentials.accessToken;
-  const aspectRatio = mapImageSize(body.size);
-
-  const upstreamBody = {
-    prompt: body.prompt,
-    aspect_ratio: aspectRatio,
-    number_of_images: body.n ?? 1,
-  };
-
-  if (log) {
-    const promptPreview = String(body.prompt ?? "").slice(0, 60);
-    log.info(
-      "IMAGE",
-      `${provider}/${model} (imagen3) | prompt: "${promptPreview}..." | aspect_ratio: ${aspectRatio}`
-    );
-  }
-
-  try {
-    const response = await fetch(providerConfig.baseUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify(upstreamBody),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      if (log)
-        log.error("IMAGE", `${provider} error ${response.status}: ${errorText.slice(0, 200)}`);
-
-      saveCallLog({
-        method: "POST",
-        path: "/v1/images/generations",
-        status: response.status,
-        model: `${provider}/${model}`,
-        provider,
-        duration: Date.now() - startTime,
-        error: errorText.slice(0, 500),
-        requestBody: upstreamBody,
-      }).catch(() => {});
-
-      return { success: false, status: response.status, error: errorText };
-    }
-
-    const data = await response.json();
-
-    // Normalize response to OpenAI format
-    const images: Imagen3NormalizedImage[] = [];
-    if (Array.isArray(data.images)) {
-      images.push(
-        ...data.images.map((img: Record<string, unknown>) => ({
-          b64_json: img.image ?? img.b64_json ?? img.url ?? img,
-          revised_prompt: body.prompt,
-        }))
-      );
-    } else if (Array.isArray(data.data)) {
-      images.push(...data.data);
-    } else if (data.url || data.b64_json || data.image) {
-      images.push({
-        b64_json: data.image || data.b64_json || data.url,
-        url: data.url,
-        revised_prompt: body.prompt,
-      });
-    }
-
-    saveCallLog({
-      method: "POST",
-      path: "/v1/images/generations",
-      status: 200,
-      model: `${provider}/${model}`,
-      provider,
-      duration: Date.now() - startTime,
-      responseBody: { images_count: images.length },
-    }).catch(() => {});
-
-    return {
-      success: true,
-      data: { created: data.created || Math.floor(Date.now() / 1000), data: images },
-    };
-  } catch (err: unknown) {
-    const errMsg = err instanceof Error ? err.message : String(err);
-    if (log) log.error("IMAGE", `${provider} fetch error: ${errMsg}`);
-
-    saveCallLog({
-      method: "POST",
-      path: "/v1/images/generations",
-      status: 502,
-      model: `${provider}/${model}`,
-      provider,
-      duration: Date.now() - startTime,
-      error: errMsg,
-    }).catch(() => {});
-
-    return { success: false, status: 502, error: `Image provider error: ${errMsg}` };
-  }
-}

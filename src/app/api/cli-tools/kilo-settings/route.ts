@@ -11,21 +11,22 @@ import { saveCliToolLastConfigured, deleteCliToolLastConfigured } from "@/lib/db
 import { cliModelConfigSchema } from "@/shared/validation/schemas";
 import { isValidationFailure, validateBody } from "@/shared/validation/helpers";
 import { resolveApiKey } from "@/shared/services/apiKeyResolver";
+import { readJsoncConfig } from "../_lib/jsoncConfig";
+import {
+  configClobberRefusalResponse,
+  parseJsoncObject,
+  readExistingConfig,
+} from "../_lib/readExistingConfig";
 
 const KILO_DATA_DIR = path.join(os.homedir(), ".local", "share", "kilo");
 const AUTH_PATH = path.join(KILO_DATA_DIR, "auth.json");
 const KILO_CONFIG_DIR = path.join(os.homedir(), ".config", "kilo");
 
-// Read auth.json
-const readAuth = async () => {
-  try {
-    const content = await fs.readFile(AUTH_PATH, "utf-8");
-    return JSON.parse(content);
-  } catch (error) {
-    if (error.code === "ENOENT") return null;
-    throw error;
-  }
-};
+// Read auth.json.
+// Ported from upstream decolua/9router@6c10edf8: tolerate JSONC (trailing
+// commas) and return null on any parse error so the dashboard renders
+// "installed but not configured" instead of a 500 misread as "not installed".
+const readAuth = async () => readJsoncConfig(AUTH_PATH);
 
 // Check if OmniRoute OpenAI-compatible provider is configured
 const hasOmniRouteConfig = (auth) => {
@@ -153,14 +154,9 @@ export async function POST(request) {
     // Backup auth before modifying
     await createBackup("kilo", AUTH_PATH);
 
-    // Read existing auth
-    let auth = {};
-    try {
-      const existing = await fs.readFile(AUTH_PATH, "utf-8");
-      auth = JSON.parse(existing);
-    } catch {
-      /* No existing auth */
-    }
+    // Read existing auth — only a missing file starts fresh; an unreadable or
+    // unparsable one is refused (409) instead of being replaced.
+    const auth: Record<string, any> = (await readExistingConfig(AUTH_PATH, parseJsoncObject)) ?? {};
 
     // Normalize baseUrl
     const normalizedBaseUrl = baseUrl.endsWith("/v1") ? baseUrl : `${baseUrl}/v1`;
@@ -184,13 +180,11 @@ export async function POST(request) {
         "User",
         "settings.json"
       );
-      let vscodeSettings = {};
-      try {
-        const raw = await fs.readFile(vscodeSettingsPath, "utf-8");
-        vscodeSettings = JSON.parse(raw);
-      } catch {
-        /* no existing settings */
-      }
+      // VS Code settings.json is user-owned JSONC. If it cannot be parsed, the
+      // refusal lands in the catch below and the (optional) extension write is
+      // skipped — never replace the user's whole settings file.
+      const vscodeSettings: Record<string, any> =
+        (await readExistingConfig(vscodeSettingsPath, parseJsoncObject)) ?? {};
 
       // Set custom provider config for the extension
       vscodeSettings["kilocode.customProvider"] = {
@@ -218,6 +212,8 @@ export async function POST(request) {
       authPath: AUTH_PATH,
     });
   } catch (error) {
+    const refusal = configClobberRefusalResponse(error);
+    if (refusal) return refusal;
     console.log("Error updating kilo settings:", error);
     return NextResponse.json({ error: "Failed to update kilo settings" }, { status: 500 });
   }

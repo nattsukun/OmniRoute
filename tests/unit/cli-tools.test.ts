@@ -10,28 +10,15 @@ const {
   normalizeCliCompatProviderId,
 } = await import("../../src/shared/constants/cliCompatProviders.ts");
 const { CLI_TOOL_IDS } = await import("../../src/shared/services/cliRuntime.ts");
+const { hasRegisteredAgent } = await import("../../src/lib/acp/registry.ts");
 const { applyFingerprint, isCliCompatEnabled, setCliCompatProviders } =
   await import("../../open-sse/config/cliFingerprints.ts");
 
-test("Amp CLI is registered as a guide-based CLI tool with shorthand mapping guidance", () => {
-  const amp = CLI_TOOLS.amp;
-  assert.ok(amp);
-  assert.equal(amp.configType, "guide");
-  assert.equal(amp.defaultCommand, "amp");
-  assert.deepEqual(amp.modelAliases, ["g25p", "g25f", "cs45", "g54"]);
-
-  const notesText = (amp.notes || [])
-    .map((note) => note?.text || "")
-    .join(" ")
-    .toLowerCase();
-
-  assert.match(notesText, /shorthand/);
-  assert.match(notesText, /g25p/);
-  assert.match(notesText, /claude-sonnet-4-5-20250929/);
-});
-
-test("Amp CLI is discoverable in runtime tooling but excluded from provider fingerprint toggles", () => {
-  assert.ok(CLI_TOOL_IDS.includes("amp"));
+test("Amp CLI was removed from CLI_TOOLS per plan 14 D17 (MITM backlog plan 11)", () => {
+  // amp (Sourcegraph) removed from CLI_TOOLS in plan 14 because it has a closed ecosystem
+  // and does not support a generic custom base URL. Cross-ref: plan 11 MITM backlog.
+  assert.equal((CLI_TOOLS as Record<string, unknown>).amp, undefined);
+  // amp may still appear in cliRuntime.ts (runtime detection catalog — separate from UI catalog)
   assert.equal(CLI_COMPAT_PROVIDER_IDS.includes("amp"), false);
 });
 
@@ -43,6 +30,22 @@ test("Hermes quick-config is registered as a guide-based CLI tool", () => {
   assert.ok(Array.isArray(hermes.guideSteps));
   assert.ok(String(hermes.codeBlock?.code || "").includes('"baseURL": "{{baseUrl}}"'));
   assert.ok(CLI_TOOL_IDS.includes("hermes"));
+});
+
+test("CLI tools with unresolved logo provenance use the bundled generic icon", () => {
+  for (const toolId of ["droid", "kilo", "omp", "letta"] as const) {
+    assert.ok(CLI_TOOLS[toolId], `${toolId} must remain in the CLI catalog`);
+    assert.equal(CLI_TOOLS[toolId].image, "/providers/cli-generic.svg");
+  }
+
+  assert.ok(CLI_TOOLS.opencode, "opencode must remain in the CLI catalog");
+  assert.equal(CLI_TOOLS.opencode.imageLight, "/providers/cli-generic.svg");
+  assert.equal(CLI_TOOLS.opencode.imageDark, "/providers/cli-generic.svg");
+});
+
+test("ACP registry accepts the Gemini CLI target used by the manager", () => {
+  assert.equal(hasRegisteredAgent("gemini"), true);
+  assert.equal(hasRegisteredAgent("definitely-not-an-agent"), false);
 });
 
 test("CLI fingerprint toggles only expose implemented fingerprints and functional legacy aliases", () => {
@@ -75,8 +78,24 @@ test("CLI fingerprint toggles only expose implemented fingerprints and functiona
   }
 
   assert.equal(CLI_COMPAT_TOGGLE_IDS.includes("copilot"), true);
-  assert.equal(CLI_COMPAT_TOGGLE_IDS.includes("gemini-cli"), true);
   assert.equal((CLI_COMPAT_TOGGLE_IDS as readonly string[]).includes("github"), false);
+});
+
+test("CLI fingerprint strips OmniRoute internal body fields before upstream serialization", () => {
+  const claude = applyFingerprint(
+    "claude",
+    { Authorization: "Bearer token" },
+    {
+      model: "claude-sonnet-4-6",
+      messages: [],
+      stream: true,
+      _claudeCodeRequiresLowercaseToolNames: true,
+    }
+  );
+
+  const body = JSON.parse(claude.bodyString);
+  assert.equal(body._claudeCodeRequiresLowercaseToolNames, undefined);
+  assert.deepEqual(Object.keys(body), ["model", "messages", "stream"]);
 });
 
 test("CLI fingerprint preserves Codex executor User-Agent and maps legacy Copilot alias", () => {
@@ -84,12 +103,12 @@ test("CLI fingerprint preserves Codex executor User-Agent and maps legacy Copilo
     "codex",
     {
       Authorization: "Bearer token",
-      "User-Agent": "codex-cli/0.125.0 (Windows 10.0.26100; x64)",
+      "User-Agent": "codex-cli/0.144.1 (Windows 10.0.26200; x64)",
     },
     { model: "gpt-5.5", messages: [], stream: true }
   );
 
-  assert.equal(codex.headers["User-Agent"], "codex-cli/0.125.0 (Windows 10.0.26100; x64)");
+  assert.equal(codex.headers["User-Agent"], "codex-cli/0.144.1 (Windows 10.0.26200; x64)");
   assert.deepEqual(Object.keys(JSON.parse(codex.bodyString)), ["model", "stream", "messages"]);
 
   const copilot = applyFingerprint(
@@ -98,39 +117,9 @@ test("CLI fingerprint preserves Codex executor User-Agent and maps legacy Copilo
     { model: "gpt-4o", messages: [] }
   );
 
-  assert.equal(copilot.headers["User-Agent"], "GitHubCopilotChat/0.45.1");
-
-  const geminiCli = applyFingerprint(
-    "gemini-cli",
-    {
-      Authorization: "Bearer token",
-      "Content-Type": "application/json",
-      "User-Agent":
-        "GeminiCLI/0.40.1/gemini-2.5-flash (linux; arm64; terminal) google-api-nodejs-client/9.15.1",
-      "X-Goog-Api-Client": "gl-node/22.22.2",
-      Accept: "*/*",
-    },
-    {
-      request: {},
-      user_prompt_id: "prompt-id",
-      project: "project-id",
-      model: "gemini-2.5-flash",
-    }
-  );
-
-  assert.deepEqual(Object.keys(JSON.parse(geminiCli.bodyString)), [
-    "model",
-    "project",
-    "user_prompt_id",
-    "request",
-  ]);
-  assert.deepEqual(Object.keys(geminiCli.headers), [
-    "Content-Type",
-    "User-Agent",
-    "X-Goog-Api-Client",
-    "Accept",
-    "Authorization",
-  ]);
+  // #10952 bumped GITHUB_COPILOT_CLI_VERSION 0.54.0 -> 1.0.88; the fingerprint
+  // pin tracks the advertised upstream CLI version.
+  assert.equal(copilot.headers["User-Agent"], "GitHubCopilotChat/1.0.91");
 });
 
 test("CLI fingerprint keeps legacy Copilot settings functional without exposing duplicate UI toggles", () => {
@@ -141,9 +130,6 @@ test("CLI fingerprint keeps legacy Copilot settings functional without exposing 
     setCliCompatProviders(["copilot"]);
     assert.equal(isCliCompatEnabled("github"), true);
     assert.equal(isCliCompatEnabled("copilot"), true);
-    setCliCompatProviders(["gemini-cli"]);
-    assert.equal(isCliCompatEnabled("gemini-cli"), true);
-    assert.equal(isCliCompatEnabled("gemini"), false);
   } finally {
     setCliCompatProviders([]);
   }

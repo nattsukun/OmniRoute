@@ -69,9 +69,40 @@ export class CloudflareAIExecutor extends BaseExecutor {
     _stream: boolean,
     _credentials: CloudflareCredentials
   ): Record<string, unknown> {
-    // Cloudflare uses full model paths like @cf/meta/llama-3.3-70b-instruct
-    // No transformation needed — user sends the full Cloudflare model path.
-    return body;
+    // Cloudflare uses full model paths like @cf/meta/llama-3.3-70b-instruct — the model id
+    // needs no transformation. The `content` shape, however, is validated against the
+    // *model's* schema and not the endpoint's: text-only models declare `content: string`
+    // and reject the OpenAI content-part array with HTTP 400 (#2539), while multimodal
+    // models declare `content: string | array` and accept it. Flattening an all-text array
+    // to a plain string is therefore still right — it is the one shape every model accepts.
+    if (!Array.isArray(body.messages)) return body;
+
+    // #6390 refused any non-text part instead of letting it vanish into a flattened string,
+    // and refusing did beat dropping. Passing the array through is better still: an image is
+    // only meaningful to a multimodal model, and those accept the array shape. When the
+    // target model is text-only, Cloudflare answers with its own 400, which is more useful
+    // than a gateway refusal that pre-empts every model alike.
+    const isTextPart = (part: unknown): boolean => {
+      if (!part || typeof part !== "object") return false;
+      const p = part as Record<string, unknown>;
+      return p.type === "text" && typeof p.text === "string";
+    };
+
+    const flattenTextParts = (content: unknown[]): string =>
+      content.map((part) => (part as Record<string, unknown>).text as string).join("");
+
+    // Workers AI also requires `content` on every message (#4838). Assistant turns that only
+    // carry tool_calls arrive with the key absent (the Claude→OpenAI translator omits it) or
+    // set to null (standard OpenAI clients); both are rejected with HTTP 400, so fill "".
+    const messages = (body.messages as Array<Record<string, unknown>>).map((msg) => {
+      if (!msg || typeof msg !== "object") return msg;
+      if (msg.content === undefined || msg.content === null) return { ...msg, content: "" };
+      return Array.isArray(msg.content) && msg.content.every(isTextPart)
+        ? { ...msg, content: flattenTextParts(msg.content) }
+        : msg;
+    });
+
+    return { ...body, messages };
   }
 }
 

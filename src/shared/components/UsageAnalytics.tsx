@@ -1,9 +1,11 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, useSyncExternalStore } from "react";
+import { useLocale, useTranslations } from "next-intl";
 import Card from "./Card";
 import { CardSkeleton } from "./Loading";
 import { fmtCompact as fmt, fmtFull, fmtCost } from "@/shared/utils/formatting";
+import { readFetchErrorMessage } from "@/shared/utils/fetchError";
 import {
   StatCard,
   CompactStatGrid,
@@ -18,19 +20,62 @@ import {
   ProviderCostDonut,
   ModelOverTimeChart,
   ProviderTable,
+  ServiceTierBreakdown,
   ApiKeyFilterDropdown,
   CustomRangePicker,
+  RequestCountByProviderDateTable,
 } from "./analytics";
 
 // ============================================================================
 // Main Component
 // ============================================================================
 
+const TOKEN_DISPLAY_MODE_KEY = "omniroute:analytics-token-display-mode";
+export type TokenDisplayMode = "compact" | "exact";
+
+const tokenDisplayListeners = new Set<() => void>();
+
+function subscribeToTokenDisplayMode(listener: () => void): () => void {
+  tokenDisplayListeners.add(listener);
+  return () => {
+    tokenDisplayListeners.delete(listener);
+  };
+}
+
+function readTokenDisplayMode(): TokenDisplayMode {
+  try {
+    if (typeof window === "undefined") return "compact";
+    const saved = localStorage.getItem(TOKEN_DISPLAY_MODE_KEY);
+    if (saved === "exact" || saved === "compact") return saved;
+  } catch {}
+  return "compact";
+}
+
+function writeTokenDisplayMode(mode: TokenDisplayMode): void {
+  try {
+    localStorage.setItem(TOKEN_DISPLAY_MODE_KEY, mode);
+  } catch {}
+  for (const listener of tokenDisplayListeners) listener();
+}
+
 export default function UsageAnalytics() {
+  const locale = useLocale();
+  const t = useTranslations("analytics");
+  const tCommon = useTranslations("common");
   const [range, setRange] = useState("30d");
   const [analytics, setAnalytics] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const tokenDisplayMode = useSyncExternalStore(
+    subscribeToTokenDisplayMode,
+    readTokenDisplayMode,
+    () => "compact" as TokenDisplayMode
+  );
+
+  const handleToggleDisplayMode = useCallback((mode: TokenDisplayMode) => {
+    writeTokenDisplayMode(mode);
+  }, []);
 
   // Custom date range state
   const [customStart, setCustomStart] = useState("");
@@ -47,6 +92,9 @@ export default function UsageAnalytics() {
       setLoading(true);
       const params = new URLSearchParams();
       params.set("range", range);
+      // This page labels the value as an estimate, so opt into token-price
+      // equivalents for flat-rate subscriptions without changing API defaults.
+      params.set("includeFlatRateEstimates", "true");
       if (range === "custom" && customStart && customEnd) {
         params.set("startDate", customStart);
         params.set("endDate", customEnd);
@@ -55,22 +103,21 @@ export default function UsageAnalytics() {
         params.set("apiKeyIds", selectedApiKeys.join(","));
       }
       const res = await fetch(`/api/usage/analytics?${params.toString()}`);
-      if (!res.ok) throw new Error("Failed to fetch");
+      if (!res.ok) throw new Error(await readFetchErrorMessage(res, tCommon("error")));
       const data = await res.json();
       setAnalytics(data);
       setError(null);
 
       // Update available keys from unfiltered data (only when no filter is active).
-      // Use apiKeyName as the stable identifier — it is always populated
-      // for every OmniRoute API key regardless of the downstream provider.
       if (selectedApiKeys.length === 0 && data.byApiKey?.length > 0) {
         const seen = new Set<string>();
         const keys: { id: string; name: string }[] = [];
         for (const k of data.byApiKey) {
-          const name = k.apiKeyName || k.apiKeyId || "unknown";
-          if (seen.has(name)) continue;
-          seen.add(name);
-          keys.push({ id: name, name });
+          const id = k.apiKeyId || k.apiKeyName || tCommon("unknownProvider");
+          const name = k.apiKeyName || k.apiKeyId || tCommon("unknownProvider");
+          if (seen.has(id)) continue;
+          seen.add(id);
+          keys.push({ id, name });
         }
         setAvailableApiKeys(keys);
       }
@@ -79,10 +126,11 @@ export default function UsageAnalytics() {
     } finally {
       setLoading(false);
     }
-  }, [range, customStart, customEnd, selectedApiKeys]);
+  }, [range, customStart, customEnd, selectedApiKeys, tCommon]);
 
   useEffect(() => {
-    fetchAnalytics();
+    const timer = window.setTimeout(() => void fetchAnalytics(), 0);
+    return () => window.clearTimeout(timer);
   }, [fetchAnalytics]);
 
   const handleRangeSelect = useCallback((value: string) => {
@@ -106,7 +154,7 @@ export default function UsageAnalytics() {
     if (range !== "custom" || !customStart || !customEnd) return null;
     const fmt = (iso: string) => {
       const d = new Date(iso);
-      return d.toLocaleDateString(undefined, {
+      return d.toLocaleDateString(locale, {
         month: "short",
         day: "numeric",
         hour: "2-digit",
@@ -114,15 +162,15 @@ export default function UsageAnalytics() {
       });
     };
     return `${fmt(customStart)} — ${fmt(customEnd)}`;
-  }, [range, customStart, customEnd]);
+  }, [range, customStart, customEnd, locale]);
 
   const ranges = [
-    { value: "1d", label: "1D" },
-    { value: "7d", label: "7D" },
-    { value: "30d", label: "30D" },
-    { value: "90d", label: "90D" },
-    { value: "ytd", label: "YTD" },
-    { value: "all", label: "All" },
+    { value: "1d", label: t("period1D") },
+    { value: "7d", label: t("period7D") },
+    { value: "30d", label: t("period30D") },
+    { value: "90d", label: t("period90D") },
+    { value: "ytd", label: t("periodYTD") },
+    { value: "all", label: t("periodAll") },
   ];
 
   const topModel = useMemo(() => {
@@ -139,8 +187,13 @@ export default function UsageAnalytics() {
     const wp = analytics?.weeklyPattern || [];
     if (!wp.length) return "—";
     const max = wp.reduce((a, b) => (a.avgTokens > b.avgTokens ? a : b), wp[0]);
-    return max.avgTokens > 0 ? max.day : "—";
-  }, [analytics]);
+    if (max.avgTokens <= 0) return "—";
+    const weekdayIndex = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(max.day);
+    if (weekdayIndex < 0) return max.day;
+    return new Intl.DateTimeFormat(locale, { weekday: "short" }).format(
+      new Date(2024, 0, 7 + weekdayIndex)
+    );
+  }, [analytics, locale]);
 
   const providerCount = useMemo(() => {
     return (analytics?.byProvider || []).length;
@@ -167,7 +220,12 @@ export default function UsageAnalytics() {
   }, [analytics]);
 
   if (loading && !analytics) return <CardSkeleton />;
-  if (error) return <Card className="p-6 text-center text-red-500">Error: {error}</Card>;
+  if (error)
+    return (
+      <Card className="p-6 text-center text-red-500">
+        {tCommon("errorShort")}: {error}
+      </Card>
+    );
 
   const s = analytics?.summary || {};
 
@@ -182,9 +240,45 @@ export default function UsageAnalytics() {
       <div className="flex items-center justify-between flex-wrap gap-3">
         <h2 className="text-xl font-semibold flex items-center gap-2">
           <span className="material-symbols-outlined text-primary text-[22px]">analytics</span>
-          Usage Analytics
+          {t("usageAnalyticsTitle")}
         </h2>
         <div className="flex items-center gap-2.5">
+          {/* Token Display Mode Toggle (Compact vs Exact) */}
+          <div
+            role="radiogroup"
+            aria-label={t("tokenDisplayMode")}
+            className="flex items-center gap-0.5 bg-black/[0.03] dark:bg-white/[0.03] rounded-lg p-1 border border-black/5 dark:border-white/5 text-xs"
+          >
+            <button
+              type="button"
+              role="radio"
+              aria-checked={tokenDisplayMode === "compact"}
+              onClick={() => handleToggleDisplayMode("compact")}
+              title={t("tokenDisplayCompact")}
+              className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-all cursor-pointer ${
+                tokenDisplayMode === "compact"
+                  ? "bg-surface text-text-main shadow-xs"
+                  : "text-text-muted hover:text-text-main hover:bg-black/5 dark:hover:bg-white/5"
+              }`}
+            >
+              {t("tokenDisplayCompact")}
+            </button>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={tokenDisplayMode === "exact"}
+              onClick={() => handleToggleDisplayMode("exact")}
+              title={t("tokenDisplayExact")}
+              className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-all cursor-pointer ${
+                tokenDisplayMode === "exact"
+                  ? "bg-surface text-text-main shadow-xs"
+                  : "text-text-muted hover:text-text-main hover:bg-black/5 dark:hover:bg-white/5"
+              }`}
+            >
+              {t("tokenDisplayExact")}
+            </button>
+          </div>
+
           {/* API Key Filter */}
           <ApiKeyFilterDropdown
             available={availableApiKeys}
@@ -219,7 +313,7 @@ export default function UsageAnalytics() {
               }`}
             >
               <span className="material-symbols-outlined text-[13px]">date_range</span>
-              {customRangeLabel || "Custom"}
+              {customRangeLabel || t("customRange")}
               {range === "custom" && customRangeLabel && (
                 <span
                   role="button"
@@ -253,26 +347,42 @@ export default function UsageAnalytics() {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <StatCard
           icon="generating_tokens"
-          label="Total Tokens"
-          value={fmt(s.totalTokens)}
-          subValue={`${fmtFull(s.totalRequests)} requests`}
+          label={t("totalTokens")}
+          value={tokenDisplayMode === "exact" ? fmtFull(s.totalTokens) : fmt(s.totalTokens)}
+          tooltip={tokenDisplayMode === "exact" ? `~${fmt(s.totalTokens)}` : fmtFull(s.totalTokens)}
+          subValue={`${fmtFull(s.totalRequests)} ${t("chartRequests")}`}
         />
         <StatCard
           icon="input"
-          label="Input Tokens"
-          value={fmt(s.promptTokens)}
+          label={t("inputTokens")}
+          value={tokenDisplayMode === "exact" ? fmtFull(s.promptTokens) : fmt(s.promptTokens)}
+          tooltip={
+            tokenDisplayMode === "exact" ? `~${fmt(s.promptTokens)}` : fmtFull(s.promptTokens)
+          }
           color="text-primary"
         />
         <StatCard
           icon="output"
-          label="Output Tokens"
-          value={fmt(s.completionTokens)}
+          label={t("outputTokens")}
+          value={
+            tokenDisplayMode === "exact" ? fmtFull(s.completionTokens) : fmt(s.completionTokens)
+          }
+          tooltip={
+            tokenDisplayMode === "exact"
+              ? `~${fmt(s.completionTokens)}`
+              : fmtFull(s.completionTokens)
+          }
           color="text-emerald-500"
         />
         <StatCard
           icon="payments"
-          label="Est. Cost"
+          label={t("estCost")}
           value={fmtCost(s.totalCost)}
+          tooltip={
+            s.totalCost !== undefined && s.totalCost !== null
+              ? `$${Number(s.totalCost).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 6 })}`
+              : undefined
+          }
           color="text-amber-500"
         />
       </div>
@@ -281,55 +391,96 @@ export default function UsageAnalytics() {
       <CompactStatGrid
         sections={[
           {
-            title: "Infrastructure",
+            title: t("infraTitle"),
             items: [
-              { icon: "group", label: "Accounts", value: s.uniqueAccounts || 0 },
-              { icon: "dns", label: "Providers", value: providerCount, color: "text-indigo-500" },
-              { icon: "vpn_key", label: "API Keys", value: s.uniqueApiKeys || 0 },
-              { icon: "model_training", label: "Models", value: s.uniqueModels || 0 },
+              { icon: "group", label: t("infraAccounts"), value: s.uniqueAccounts || 0 },
+              {
+                icon: "dns",
+                label: t("infraProviders"),
+                value: providerCount,
+                color: "text-indigo-500",
+              },
+              { icon: "vpn_key", label: t("infraApiKeys"), value: s.uniqueApiKeys || 0 },
+              { icon: "model_training", label: t("infraModels"), value: s.uniqueModels || 0 },
             ],
           },
           {
-            title: "Performance",
+            title: t("perfTitle"),
             items: [
               {
                 icon: "speed",
-                label: "Avg Tokens/Req",
-                value: fmt(avgTokensPerReq),
+                label: t("perfAvgTokens"),
+                value:
+                  tokenDisplayMode === "exact" ? fmtFull(avgTokensPerReq) : fmt(avgTokensPerReq),
+                tooltip:
+                  tokenDisplayMode === "exact"
+                    ? `tokens : ~${fmt(avgTokensPerReq)} tokens`
+                    : `tokens : ${fmtFull(avgTokensPerReq)} tokens`,
                 color: "text-cyan-500",
               },
               {
                 icon: "request_quote",
-                label: "Cost/Req",
+                label: t("perfCostReq"),
                 value: fmtCost(costPerReq),
+                tooltip: costPerReq
+                  ? `cost : $${Number(costPerReq).toLocaleString(undefined, { minimumFractionDigits: 4, maximumFractionDigits: 6 })}`
+                  : undefined,
                 color: "text-orange-500",
               },
               {
                 icon: "compare_arrows",
-                label: "I/O Ratio",
+                label: t("perfIoRatio"),
                 value: `${ioRatio}x`,
                 color: "text-violet-500",
               },
               {
-                icon: "swap_horiz",
-                label: "Fallback Rate",
-                value: `${Number(s.fallbackRatePct || 0).toFixed(1)}%`,
-                color: "text-amber-500",
+                icon: "bolt",
+                label: t("perfFastReq"),
+                value:
+                  tokenDisplayMode === "exact"
+                    ? fmtFull(s.fastRequests || 0)
+                    : fmt(s.fastRequests || 0),
+                tooltip:
+                  tokenDisplayMode === "exact"
+                    ? `requests : ~${fmt(s.fastRequests || 0)} requests`
+                    : `requests : ${fmtFull(s.fastRequests || 0)} requests`,
+                color: "text-sky-500",
               },
             ],
           },
           {
-            title: "Highlights",
+            title: t("highlightsTitle"),
             wideValues: true,
             items: [
-              { icon: "star", label: "Top Model", value: topModel, color: "text-pink-500" },
-              { icon: "cloud", label: "Top Provider", value: topProvider, color: "text-teal-500" },
-              { icon: "today", label: "Busiest Day", value: busiestDay, color: "text-rose-500" },
+              {
+                icon: "star",
+                label: t("highlightsTopModel"),
+                value: topModel,
+                color: "text-pink-500",
+              },
+              {
+                icon: "cloud",
+                label: t("highlightsTopProvider"),
+                value: topProvider,
+                color: "text-teal-500",
+              },
+              {
+                icon: "today",
+                label: t("highlightsBusiestDay"),
+                value: busiestDay,
+                color: "text-rose-500",
+              },
               {
                 icon: "network_node",
-                label: "Diversity",
+                label: t("highlightsDiversity"),
                 value: `${providerDiversity.toFixed(1)}%`,
                 color: "text-sky-500",
+              },
+              {
+                icon: "swap_horiz",
+                label: t("highlightsFallbackRate"),
+                value: `${Number(s.fallbackRatePct || 0).toFixed(1)}%`,
+                color: "text-amber-500",
               },
             ],
           },
@@ -351,6 +502,9 @@ export default function UsageAnalytics() {
         <ProviderCostDonut byProvider={analytics?.byProvider} />
       </div>
 
+      {/* Fast / Standard service tier split */}
+      <ServiceTierBreakdown byServiceTier={analytics?.byServiceTier} summary={s} />
+
       {/* Model Usage Over Time (stacked area) */}
       <ModelOverTimeChart
         dailyByModel={analytics?.dailyByModel}
@@ -364,13 +518,16 @@ export default function UsageAnalytics() {
       </div>
 
       {/* Provider Breakdown Table */}
-      <ProviderTable byProvider={analytics?.byProvider} />
+      <ProviderTable byProvider={analytics?.byProvider} displayMode={tokenDisplayMode} />
+
+      {/* Request Count by Provider & Date — #4009 (some providers bill per-request) */}
+      <RequestCountByProviderDateTable range={range} displayMode={tokenDisplayMode} />
 
       {/* API Key Table */}
-      <ApiKeyTable byApiKey={analytics?.byApiKey} />
+      <ApiKeyTable byApiKey={analytics?.byApiKey} displayMode={tokenDisplayMode} />
 
       {/* Model Breakdown Table */}
-      <ModelTable byModel={analytics?.byModel} summary={s} />
+      <ModelTable byModel={analytics?.byModel} summary={s} displayMode={tokenDisplayMode} />
     </div>
   );
 }

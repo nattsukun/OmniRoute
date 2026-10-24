@@ -30,6 +30,27 @@ test("fetchCodexQuota returns null when no registered credentials exist", async 
   assert.equal(quota, null);
 });
 
+test("fetchCodexQuota exposes available paid credits without changing exhausted subscription windows", async () => {
+  globalThis.fetch = async () =>
+    Response.json({
+      rate_limit: { limit_reached: true, primary_window: { used_percent: 100 } },
+      credits: { has_credits: true, unlimited: false, overage_limit_reached: false, balance: null },
+    });
+  const connectionId = "codex-paid-credits-fetch";
+  try {
+    const quota = await fetchCodexQuota(connectionId, {
+      accessToken: "test-token",
+      providerSpecificData: { workspaceId: "test-workspace" },
+    });
+    assert.equal(quota?.paidCredits?.hasCredits, true);
+    assert.equal(quota?.paidCredits?.balance, null);
+    assert.equal(quota?.limitReached, true);
+    assert.equal(quota?.windows?.session.percentUsed, 1);
+  } finally {
+    invalidateCodexQuotaCache(connectionId);
+  }
+});
+
 test("fetchCodexQuota can read credentials directly from the provided connection snapshot", async () => {
   const connectionId = `codex-inline-${Date.now()}`;
   const calls = [];
@@ -118,6 +139,63 @@ test("fetchCodexQuota parses dual-window usage, forwards workspace headers, and 
   invalidateCodexQuotaCache(connectionId);
 });
 
+test("fetchCodexQuota evaluates normal and Spark windows independently by requested model", async () => {
+  const connectionId = `codex-spark-scope-${Date.now()}`;
+  let calls = 0;
+
+  registerCodexConnection(connectionId, {
+    accessToken: "access-token-spark",
+  });
+
+  globalThis.fetch = async () => {
+    calls++;
+    return new Response(
+      JSON.stringify({
+        rate_limit: {
+          primary_window: { used_percent: 20, reset_after_seconds: 60 },
+          secondary_window: { used_percent: 30, reset_after_seconds: 120 },
+        },
+        additional_rate_limits: [
+          {
+            limit_id: "codex_bengalfox",
+            limit_name: "GPT-5.3-Codex-Spark",
+            metered_feature: "gpt_5_3_codex_spark",
+            rate_limit: {
+              primary_window: { used_percent: 100, reset_after_seconds: 300 },
+              secondary_window: { used_percent: 40, reset_after_seconds: 600 },
+            },
+          },
+        ],
+      }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }
+    );
+  };
+
+  const normal = await fetchCodexQuota(connectionId, { requestedModel: "gpt-5.3-codex" });
+  const spark = await fetchCodexQuota(connectionId, { requestedModel: "gpt-5.3-codex-spark" });
+
+  assert.equal(calls, 2, "normal and Spark scopes use separate cache entries");
+  assert.equal(normal.percentUsed, 0.3);
+  assert.equal(normal.windows?.session.percentUsed, 0.2);
+  assert.equal(normal.windows?.weekly.percentUsed, 0.3);
+  assert.equal(normal.windows?.gpt_5_3_codex_spark_session, undefined);
+  assert.equal(spark.percentUsed, 1);
+  assert.equal(spark.windows?.gpt_5_3_codex_spark_session.percentUsed, 1);
+  assert.equal(spark.windows?.gpt_5_3_codex_spark_weekly.percentUsed, 0.4);
+  assert.equal(spark.windows?.session, undefined);
+
+  const sparkCached = await fetchCodexQuota(connectionId, {
+    requestedModel: "gpt-5.3-codex-spark",
+  });
+  assert.equal(calls, 2);
+  assert.deepEqual(sparkCached, spark);
+
+  invalidateCodexQuotaCache(connectionId);
+});
+
 test("fetchCodexQuota drops bad credentials after an authorization failure", async () => {
   const connectionId = `codex-auth-${Date.now()}`;
   let calls = 0;
@@ -170,11 +248,14 @@ test("registerCodexQuotaFetcher exposes Codex quota to preflight and monitor flo
     accessToken: "quota-token",
   });
 
+  // Use 100% (fully exhausted) to avoid floating-point boundary issues:
+  // (1 - 0.98) * 100 = 2.0000000000000018, which is > DEFAULT_MIN_REMAINING_PERCENT (2),
+  // so the preflight wouldn't block. 100% used → 0% remaining, clearly below 2%.
   globalThis.fetch = async () =>
     new Response(
       JSON.stringify({
         rate_limit: {
-          primary_window: { used_percent: 98, reset_after_seconds: 90 },
+          primary_window: { used_percent: 100, reset_after_seconds: 90 },
         },
       }),
       {

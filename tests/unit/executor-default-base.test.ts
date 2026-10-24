@@ -9,14 +9,18 @@ import {
   mergeUpstreamExtraHeaders,
   setUserAgentHeader,
 } from "../../open-sse/executors/base.ts";
+import { shouldForceResponsesUpstream } from "../../open-sse/executors/forceResponsesUpstream.ts";
 import { DefaultExecutor } from "../../open-sse/executors/default.ts";
+import { NO_REFRESH_NEEDED } from "../../open-sse/services/tokenRefresh/shared.ts";
 import { PROVIDERS } from "../../open-sse/config/constants.ts";
-import { BEDROCK_DEFAULT_BASE_URL } from "../../open-sse/config/bedrock.ts";
 import {
   CLAUDE_CODE_COMPATIBLE_ANTHROPIC_VERSION,
   CLAUDE_CODE_COMPATIBLE_DEFAULT_CHAT_PATH,
+  CLAUDE_CODE_COMPATIBLE_REDACT_THINKING_BETA,
   CONTEXT_1M_BETA_HEADER,
 } from "../../open-sse/services/claudeCodeCompatible.ts";
+import { runWithCapture } from "../../open-sse/utils/providerRequestLogging.ts";
+import { CLAUDE_CODE_CLIENT_BILLING_VERSION } from "../../src/shared/constants/claudeCodeClient.ts";
 
 class TestExecutor extends BaseExecutor {
   constructor(config = {}) {
@@ -73,10 +77,9 @@ test("BaseExecutor: legacy openai-compatible providers honor providerSpecificDat
   assert.equal(url, "https://proxy.example/v1/responses");
 });
 
-test("DefaultExecutor.buildUrl handles Gemini, Claude and Qwen variants", () => {
+test("DefaultExecutor.buildUrl handles Gemini and Claude variants", () => {
   const gemini = new DefaultExecutor("gemini");
   const claude = new DefaultExecutor("claude");
-  const qwen = new DefaultExecutor("qwen");
 
   assert.equal(
     gemini.buildUrl("gemini-2.5-flash", false),
@@ -87,12 +90,47 @@ test("DefaultExecutor.buildUrl handles Gemini, Claude and Qwen variants", () => 
     "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse"
   );
   assert.equal(claude.buildUrl("claude-sonnet-4", true), `${PROVIDERS.claude.baseUrl}?beta=true`);
-  assert.equal(qwen.buildUrl("qwen3-coder", true), "https://portal.qwen.ai/v1/chat/completions");
+});
+
+test("DefaultExecutor.buildUrl uses full chat endpoints for hosted OpenAI-compatible providers", () => {
+  const bazaarlink = new DefaultExecutor("bazaarlink");
+  const crof = new DefaultExecutor("crof");
+
   assert.equal(
-    qwen.buildUrl("qwen3-coder", true, 0, {
-      providerSpecificData: { resourceUrl: "custom.qwen.ai" },
+    bazaarlink.buildUrl("auto:free", true),
+    "https://bazaarlink.ai/api/v1/chat/completions"
+  );
+  assert.equal(crof.buildUrl("gpt-4.1", true), "https://crof.ai/v1/chat/completions");
+});
+
+test("DefaultExecutor.buildUrl honors a custom providerSpecificData.baseUrl for the built-in openai provider", () => {
+  const openai = new DefaultExecutor("openai");
+
+  // No override → hardcoded OpenAI endpoint (unchanged behavior).
+  assert.equal(openai.buildUrl("gpt-4o", true), "https://api.openai.com/v1/chat/completions");
+
+  // Custom base URL (e.g. a proxy/gateway) must be used instead of api.openai.com.
+  assert.equal(
+    openai.buildUrl("gpt-4o", true, 0, {
+      providerSpecificData: { baseUrl: "https://api.contactboxtools.me/v1" },
     }),
-    "https://custom.qwen.ai/v1/chat/completions"
+    "https://api.contactboxtools.me/v1/chat/completions"
+  );
+
+  // Trailing slash is normalized.
+  assert.equal(
+    openai.buildUrl("gpt-4o", true, 0, {
+      providerSpecificData: { baseUrl: "https://proxy.example/v1/" },
+    }),
+    "https://proxy.example/v1/chat/completions"
+  );
+
+  // A base URL already pointing at the chat endpoint is kept as-is.
+  assert.equal(
+    openai.buildUrl("gpt-4o", true, 0, {
+      providerSpecificData: { baseUrl: "https://proxy.example/v1/chat/completions" },
+    }),
+    "https://proxy.example/v1/chat/completions"
   );
 });
 
@@ -121,6 +159,15 @@ test("DefaultExecutor.buildUrl handles openai-compatible and anthropic-compatibl
   assert.equal(
     openAIResponsesCompat.buildUrl("gpt-4.1", true, 0, {
       providerSpecificData: { baseUrl: "https://proxy.example/v1/" },
+    }),
+    "https://proxy.example/v1/responses"
+  );
+  assert.equal(
+    openAICompat.buildUrl("gpt-4.1", true, 0, {
+      providerSpecificData: {
+        baseUrl: "https://proxy.example/v1/",
+        _omnirouteForceResponsesUpstream: true,
+      },
     }),
     "https://proxy.example/v1/responses"
   );
@@ -171,14 +218,15 @@ test("DefaultExecutor.buildUrl normalizes configurable chat-openai-compat base U
   const maritalk = new DefaultExecutor("maritalk");
   const snowflake = new DefaultExecutor("snowflake");
   const gigachat = new DefaultExecutor("gigachat");
+  const siliconflow = new DefaultExecutor("siliconflow");
 
   assert.equal(
     bailian.buildUrl("qwen3-coder-plus", true, 0, {
       providerSpecificData: {
-        baseUrl: "https://coding-intl.dashscope.aliyuncs.com/apps/anthropic/v1",
+        baseUrl: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic/v1",
       },
     }),
-    "https://coding-intl.dashscope.aliyuncs.com/apps/anthropic/v1/messages?beta=true"
+    "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic/v1/messages"
   );
   assert.equal(
     heroku.buildUrl("claude-4-sonnet", true, 0, {
@@ -259,6 +307,16 @@ test("DefaultExecutor.buildUrl normalizes configurable chat-openai-compat base U
       providerSpecificData: { baseUrl: "https://gigachat.devices.sberbank.ru/api/v1" },
     }),
     "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
+  );
+  assert.equal(
+    siliconflow.buildUrl("deepseek-ai/DeepSeek-V3.2", true),
+    "https://api.siliconflow.com/v1/chat/completions"
+  );
+  assert.equal(
+    siliconflow.buildUrl("deepseek-ai/DeepSeek-V3.2", true, 0, {
+      providerSpecificData: { baseUrl: "https://api.siliconflow.cn/v1" },
+    }),
+    "https://api.siliconflow.cn/v1/chat/completions"
   );
 });
 
@@ -378,6 +436,43 @@ test("DefaultExecutor.buildHeaders handles GLM, default auth and anthropic-compa
   assert.equal(anthropicHeaders.Accept, "text/event-stream");
 });
 
+test("DefaultExecutor.buildHeaders keeps a caller-supplied Anthropic-Version (case-insensitive guard) for anthropic-compatible providers", () => {
+  // An operator may configure a Title-Case "Anthropic-Version" via the provider
+  // config headers. The default-guard at the anthropic-compatible-* branch must
+  // detect it case-insensitively and NOT add a second lowercase
+  // "anthropic-version" key, which undici would otherwise combine into
+  // "2025-01-01, 2023-06-01" and break the upstream request.
+  const anthropicCompat = new DefaultExecutor("anthropic-compatible-test");
+  // `config` is shared across instances via the provider registry, so snapshot
+  // and restore `config.headers` to avoid leaking the Title-Case override into
+  // other tests.
+  const originalConfigHeaders = anthropicCompat.config.headers;
+  anthropicCompat.config.headers = {
+    ...originalConfigHeaders,
+    "Anthropic-Version": "2025-01-01",
+  };
+
+  try {
+    const headers = anthropicCompat.buildHeaders({ apiKey: "anth-key" }, true);
+
+    const versionKeys = Object.keys(headers).filter(
+      (key) => key.toLowerCase() === "anthropic-version"
+    );
+    assert.equal(versionKeys.length, 1, "Duplicate anthropic-version header keys found");
+    assert.equal(headers["Anthropic-Version"], "2025-01-01");
+    assert.equal(headers["anthropic-version"], undefined);
+    assert.equal(headers["x-api-key"], "anth-key");
+  } finally {
+    anthropicCompat.config.headers = originalConfigHeaders;
+  }
+});
+
+test("DefaultExecutor.buildHeaders still defaults anthropic-version when no variant is present", () => {
+  const anthropicCompat = new DefaultExecutor("anthropic-compatible-test");
+  const headers = anthropicCompat.buildHeaders({ apiKey: "anth-key" }, true);
+  assert.equal(headers["anthropic-version"], "2023-06-01");
+});
+
 test("DefaultExecutor local OpenAI-style providers honor custom base URLs and skip empty bearer headers", () => {
   const lmStudio = new DefaultExecutor("lm-studio");
   const vllm = new DefaultExecutor("vllm");
@@ -390,6 +485,26 @@ test("DefaultExecutor local OpenAI-style providers honor custom base URLs and sk
   assert.equal(lmStudioUrl, "http://127.0.0.1:4321/v1/chat/completions");
   assert.equal(vllmHeaders.Authorization, undefined);
   assert.equal(vllmHeaders.Accept, "application/json");
+});
+
+test("DefaultExecutor local providers append /v1/chat/completions for bare hostname base URLs", () => {
+  const llamaCpp = new DefaultExecutor("llama-cpp");
+  const lmStudio = new DefaultExecutor("lm-studio");
+  const vllm = new DefaultExecutor("vllm");
+
+  const bareHost = llamaCpp.buildUrl("gemma-4", true, 0, {
+    providerSpecificData: { baseUrl: "https://foo.llama.example.com" },
+  });
+  const customPath = lmStudio.buildUrl("gemma-4", true, 0, {
+    providerSpecificData: { baseUrl: "https://bar.llama.ai/foo" },
+  });
+  const alreadyComplete = vllm.buildUrl("gemma-4", true, 0, {
+    providerSpecificData: { baseUrl: "https://baz.llama.ai/v1/chat/completions" },
+  });
+
+  assert.equal(bareHost, "https://foo.llama.example.com/v1/chat/completions");
+  assert.equal(customPath, "https://bar.llama.ai/foo/v1/chat/completions");
+  assert.equal(alreadyComplete, "https://baz.llama.ai/v1/chat/completions");
 });
 
 test("DefaultExecutor.buildHeaders handles Snowflake PATs and GigaChat access tokens", () => {
@@ -408,22 +523,6 @@ test("DefaultExecutor.buildHeaders handles Snowflake PATs and GigaChat access to
   assert.equal(snowflakeJwtHeaders.Authorization, "Bearer jwt-token");
   assert.equal(snowflakeJwtHeaders["X-Snowflake-Authorization-Token-Type"], "KEYPAIR_JWT");
   assert.equal(gigachatHeaders.Authorization, "Bearer gigachat-token");
-});
-
-test("DefaultExecutor.buildHeaders strips DashScope headers for Qwen API keys and preserves them for OAuth", () => {
-  const executor = new DefaultExecutor("qwen");
-
-  const apiKeyHeaders = executor.buildHeaders({ apiKey: "dash-key" }, true);
-  const oauthHeaders = executor.buildHeaders({ accessToken: "oauth-token" }, true);
-
-  assert.equal(apiKeyHeaders.Authorization, "Bearer dash-key");
-  assert.equal(
-    Object.keys(apiKeyHeaders).some((key) => key.toLowerCase().startsWith("x-dashscope-")),
-    false
-  );
-  assert.equal(oauthHeaders.Authorization, "Bearer oauth-token");
-  assert.equal(oauthHeaders["X-Dashscope-AuthType"], "qwen-oauth");
-  assert.equal(oauthHeaders["X-Dashscope-CacheControl"], "enable");
 });
 
 test("DefaultExecutor.buildHeaders rotates extra API keys and builds Claude Code compatible headers", () => {
@@ -467,7 +566,7 @@ test("DefaultExecutor.buildHeaders rotates extra API keys and builds Claude Code
   assert.equal(ccHeaders["x-api-key"], undefined);
   assert.equal(ccHeaders["anthropic-version"], CLAUDE_CODE_COMPATIBLE_ANTHROPIC_VERSION);
   assert.equal(ccHeaders["X-Claude-Code-Session-Id"], "session-1");
-  assert.equal(ccHeaders.Accept, "application/json");
+  assert.equal(ccHeaders.Accept, "text/event-stream");
   assert.equal(ccJsonHeaders.Accept, "application/json");
 });
 
@@ -504,9 +603,8 @@ test("DefaultExecutor.execute uses CC-compatible connection defaults to append 1
       stream: false,
       credentials: {
         apiKey: "cc-key",
-        providerSpecificData: {
-          ccSessionId: "session-1",
-        },
+        // #13452: buildUrl() now requires a hydrated baseUrl.
+        providerSpecificData: { ccSessionId: "session-1", baseUrl: "https://cc.test/v1" },
       },
       clientHeaders: {
         "x-app": "cli",
@@ -526,7 +624,8 @@ test("DefaultExecutor.execute uses CC-compatible connection defaults to append 1
         apiKey: "cc-key",
         providerSpecificData: {
           ccSessionId: "session-1",
-          requestDefaults: { context1m: true },
+          baseUrl: "https://cc.test/v1",
+          requestDefaults: { context1m: true, redactThinking: true },
         },
       },
       extendedContext: false,
@@ -549,13 +648,110 @@ test("DefaultExecutor.execute uses CC-compatible connection defaults to append 1
       },
       extendedContext: true,
     });
+    await cc.execute({
+      model: "claude-opus-5",
+      body: {
+        model: "claude-opus-5",
+        messages: [{ role: "user", content: "hi" }],
+        max_tokens: 1,
+      },
+      stream: false,
+      credentials: {
+        apiKey: "cc-key",
+        providerSpecificData: {
+          ccSessionId: "session-1",
+          baseUrl: "https://cc-proxy.example.test/v1",
+          requestDefaults: { context1m: true },
+        },
+      },
+      extendedContext: true,
+    });
   } finally {
     globalThis.fetch = originalFetch;
   }
 
   assert.equal(calls[0].headers["anthropic-beta"].includes(CONTEXT_1M_BETA_HEADER), false);
+  assert.equal(
+    calls[0].headers["anthropic-beta"].includes(CLAUDE_CODE_COMPATIBLE_REDACT_THINKING_BETA),
+    false
+  );
   assert.equal(calls[1].headers["anthropic-beta"].includes(CONTEXT_1M_BETA_HEADER), true);
-  assert.equal(calls[2].headers["anthropic-beta"], CONTEXT_1M_BETA_HEADER);
+  assert.equal(
+    calls[1].headers["anthropic-beta"].includes(CLAUDE_CODE_COMPATIBLE_REDACT_THINKING_BETA),
+    true
+  );
+  // claude-sonnet-4-6 GA'd 1M context (2026-02-17) and was added to CONTEXT_1M_SUPPORTED_MODELS
+  // by #7129; a non-CC anthropic-compatible target with extendedContext:true now legitimately
+  // gets the context-1m beta header (shouldForwardExtendedContext in base.ts), same as any other
+  // 1M-capable model.
+  assert.equal(calls[2].headers["anthropic-beta"].includes(CONTEXT_1M_BETA_HEADER), true);
+  // Opus 5 has a native 1M window and must not receive the legacy context beta.
+  assert.equal(calls[3].headers["anthropic-beta"].includes(CONTEXT_1M_BETA_HEADER), false);
+});
+
+test("DefaultExecutor.execute reports the exact serialized provider request before fetch", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchStarted = false;
+  let fetchBody: any = null;
+  let prepared: any = null;
+  let preparedBeforeFetch = false;
+
+  globalThis.fetch = async (_url, init = {}) => {
+    fetchStarted = true;
+    fetchBody = JSON.parse(String(init.body || "{}"));
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  try {
+    const cc = new DefaultExecutor("anthropic-compatible-cc-test");
+    const requestCapture = {
+      capture(request) {
+        preparedBeforeFetch = !fetchStarted;
+        prepared = request;
+      },
+      body(fallback) {
+        return prepared?.body ?? fallback;
+      },
+      latest() {
+        return prepared;
+      },
+    };
+    const result = await runWithCapture(requestCapture, () =>
+      cc.execute({
+        model: "claude-sonnet-4-6",
+        body: {
+          model: "claude-sonnet-4-6",
+          system: [
+            {
+              type: "text",
+              text: "x-anthropic-billing-header: cc_version=1.0.0; cc_entrypoint=sdk-cli; cch=00000;",
+            },
+          ],
+          messages: [{ role: "user", content: "hi" }],
+          max_tokens: 1,
+          reasoning_effort: "xhigh",
+        },
+        stream: false,
+        credentials: {
+          apiKey: "cc-key",
+          providerSpecificData: { ccSessionId: "session-1", baseUrl: "https://cc.test/v1" }, // #13452
+        },
+      })
+    );
+
+    assert.ok(prepared, "prepared request hook should fire before fetch");
+    assert.equal(preparedBeforeFetch, true);
+    assert.deepEqual(prepared.body, fetchBody);
+    assert.deepEqual(result.transformedBody, fetchBody);
+    assert.equal(prepared.body.reasoning_effort, "max");
+    assert.equal(fetchBody.reasoning_effort, "max");
+    assert.match(JSON.stringify(fetchBody), /\bcch=(?!00000)[0-9a-f]{5};/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("DefaultExecutor.execute only injects adaptive thinking defaults for Claude models that support x-high effort", async () => {
@@ -613,6 +809,28 @@ test("DefaultExecutor.execute only injects adaptive thinking defaults for Claude
       },
       extendedContext: false,
     });
+
+    await claude.execute({
+      model: "claude-sonnet-4-6",
+      body: {
+        model: "claude-sonnet-4-6",
+        messages: [{ role: "user", content: "hi" }],
+        max_tokens: 1,
+        thinking: { type: "disabled" },
+      },
+      stream: false,
+      credentials: {
+        apiKey: "cc-key",
+        providerSpecificData: {
+          ccSessionId: "session-1",
+        },
+      },
+      clientHeaders: {
+        "x-app": "cli",
+        "user-agent": "claude-cli/2.1.116 (external, cli)",
+      },
+      extendedContext: false,
+    });
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -626,6 +844,9 @@ test("DefaultExecutor.execute only injects adaptive thinking defaults for Claude
   assert.equal((requestBodies[1] as any).thinking, undefined);
   assert.equal((requestBodies[1] as any).context_management, undefined);
   assert.equal((requestBodies[1] as any).output_config, undefined);
+
+  assert.deepEqual((requestBodies[2] as any).thinking, { type: "disabled" });
+  assert.equal((requestBodies[2] as any).context_management, undefined);
 });
 
 test("DefaultExecutor.transformRequest injects OpenAI stream usage and preserves model ids with slashes", () => {
@@ -657,6 +878,46 @@ test("DefaultExecutor.transformRequest only injects stream usage for OpenAI chat
   assert.equal((responsesResult as any).stream_options, undefined);
 });
 
+test("DefaultExecutor.execute routes Responses-shaped MCP requests to /responses for OpenAI-compatible providers", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: Array<{ url: string; body: any }> = [];
+
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({
+      url: String(url),
+      body: JSON.parse(String(init.body)),
+    });
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  try {
+    const executor = new DefaultExecutor("openai-compatible-test");
+    await executor.execute({
+      model: "gpt-4.1",
+      body: {
+        model: "gpt-4.1",
+        input: "find tools",
+        tools: [{ type: "tool_search" }],
+      },
+      stream: false,
+      credentials: {
+        apiKey: "test-key",
+        providerSpecificData: { baseUrl: "https://proxy.example/v1/" },
+      },
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "https://proxy.example/v1/responses");
+  assert.equal(calls[0].body.stream_options, undefined);
+  assert.deepEqual(calls[0].body.tools, [{ type: "tool_search" }]);
+});
+
 test("DefaultExecutor.transformRequest respects disableStreamOptions for OpenAI chat targets", () => {
   const openAICompat = new DefaultExecutor("openai-compatible-test");
   const chatBody = { model: "gpt-4.1", messages: [{ role: "user", content: "hi" }] };
@@ -671,6 +932,44 @@ test("DefaultExecutor.transformRequest respects disableStreamOptions for OpenAI 
 
   assert.equal((chatResultDisabled as any).stream_options, undefined);
   assert.deepEqual((chatResultEnabled as any).stream_options, { include_usage: true });
+});
+
+test("DefaultExecutor.transformRequest injects OpenRouter connection preset", () => {
+  const executor = new DefaultExecutor("openrouter");
+  const body = { model: "openai/gpt-4", messages: [{ role: "user", content: "hi" }] };
+
+  const result = executor.transformRequest("openai/gpt-4", body, true, {
+    providerSpecificData: { preset: "  email-copywriter  " },
+  });
+
+  assert.equal((result as any).preset, "email-copywriter");
+  assert.deepEqual((result as any).stream_options, { include_usage: true });
+  assert.equal((body as any).preset, undefined);
+
+  const explicit = executor.transformRequest(
+    "openai/gpt-4",
+    { ...body, preset: "client-preset" },
+    true,
+    { providerSpecificData: { preset: "connection-preset" } }
+  );
+
+  assert.equal((explicit as any).preset, "client-preset");
+
+  const explicitNull = executor.transformRequest("openai/gpt-4", { ...body, preset: null }, true, {
+    providerSpecificData: { preset: "connection-preset" },
+  });
+  assert.equal((explicitNull as any).preset, null);
+
+  const explicitEmpty = executor.transformRequest("openai/gpt-4", { ...body, preset: "" }, true, {
+    providerSpecificData: { preset: "connection-preset" },
+  });
+  assert.equal((explicitEmpty as any).preset, "");
+
+  const blank = executor.transformRequest("openai/gpt-4", body, true, {
+    providerSpecificData: { preset: "   " },
+  });
+
+  assert.equal((blank as any).preset, undefined);
 });
 
 test("DefaultExecutor.transformRequest strips stream_options from Anthropic-compatible targets", () => {
@@ -702,17 +1001,167 @@ test("DefaultExecutor.transformRequest strips stream_options from Anthropic-comp
   assert.equal((ccResult as any).stream_options, undefined);
 });
 
-test("DefaultExecutor.transformRequest neutralizes incompatible tool_choice for Qwen thinking", () => {
-  const executor = new DefaultExecutor("qwen");
-  const body = {
-    messages: [{ role: "user", content: "hi" }],
-    thinking: { type: "enabled" },
-    tool_choice: { type: "function", function: { name: "pwd" } },
+// Port of decolua/9router#1343: openai-compatible-* providers (DeepSeek / Ollama /
+// local OpenAI-compatible models) often lack native Structured Output, so a
+// `json_schema` response_format is downgraded to `json_object` with the schema
+// injected into the system prompt instead.
+test("DefaultExecutor.transformRequest downgrades json_schema to json_object for openai-compatible providers and injects the schema into a fresh system prompt", () => {
+  const executor = new DefaultExecutor("openai-compatible-deepseek");
+  const schema = {
+    type: "object",
+    properties: { answer: { type: "string" } },
+    required: ["answer"],
   };
-  const result = executor.transformRequest("qwen3-coder-plus", body, true, {});
+  const body = {
+    model: "deepseek-chat",
+    messages: [{ role: "user", content: "give me JSON" }],
+    response_format: {
+      type: "json_schema",
+      json_schema: { name: "answer_schema", schema },
+    },
+  };
 
-  assert.notEqual(result, body);
-  assert.equal((result as any).tool_choice, "auto");
+  const result = executor.transformRequest("deepseek-chat", body, true, {
+    providerSpecificData: { baseUrl: "https://proxy.example/v1" },
+  }) as any;
+
+  // response_format is downgraded to json_object.
+  assert.deepEqual(result.response_format, { type: "json_object" });
+  // A system message carrying the schema is injected at the front.
+  assert.equal(result.messages[0].role, "system");
+  assert.match(result.messages[0].content, /strictly follows this JSON schema/);
+  assert.ok(result.messages[0].content.includes('"answer"'));
+  // The original user message is preserved.
+  assert.equal(result.messages[1].role, "user");
+  assert.equal(result.messages[1].content, "give me JSON");
+  // Original body is not mutated.
+  assert.equal((body as any).response_format.type, "json_schema");
+  assert.equal(body.messages.length, 1);
+});
+
+test("DefaultExecutor.transformRequest appends the json_schema prompt to an existing system message", () => {
+  const executor = new DefaultExecutor("openai-compatible-ollama");
+  const body = {
+    model: "llama3.1",
+    messages: [
+      { role: "system", content: "You are concise." },
+      { role: "user", content: "give me JSON" },
+    ],
+    response_format: {
+      type: "json_schema",
+      json_schema: { name: "s", schema: { type: "object" } },
+    },
+  };
+
+  const result = executor.transformRequest("llama3.1", body, true, {
+    providerSpecificData: { baseUrl: "https://proxy.example/v1" },
+  }) as any;
+
+  assert.deepEqual(result.response_format, { type: "json_object" });
+  assert.equal(result.messages[0].role, "system");
+  assert.match(result.messages[0].content, /^You are concise\./);
+  assert.match(result.messages[0].content, /strictly follows this JSON schema/);
+  // Existing system message object is not mutated in place.
+  assert.equal(body.messages[0].content, "You are concise.");
+});
+
+// kilocode's DeepSeek V4 Flash rejects ANY `response_format` with HTTP 400
+// (verified live 2026-08-15: both json_schema AND json_object 400 with
+// `param: response_format`) — same class as the opencode #9992 fix, but the
+// default executor's gate only covered `openai-compatible-*`, so kilocode
+// forwarded the unsupported format raw. For kilocode the format must be
+// STRIPPED entirely (schema injected into the system prompt), because even
+// the json_object downgrade is rejected.
+test("DefaultExecutor.transformRequest strips response_format for kilocode (DeepSeek 400 regression)", () => {
+  const executor = new DefaultExecutor("kilocode");
+  const schema = {
+    type: "object",
+    properties: { answer: { type: "string" } },
+    required: ["answer"],
+  };
+  const body = {
+    model: "deepseek/deepseek-v4-flash",
+    messages: [{ role: "user", content: "give me JSON" }],
+    response_format: {
+      type: "json_schema",
+      json_schema: { name: "answer_schema", schema },
+    },
+  };
+
+  const result = executor.transformRequest("deepseek/deepseek-v4-flash", body, true, {
+    providerSpecificData: { baseUrl: "https://api.kilo.ai/v1" },
+  }) as unknown as {
+    response_format?: { type?: string };
+    messages: Array<{ role: string; content: string }>;
+  };
+
+  // response_format is REMOVED entirely (kilocode rejects json_object too).
+  assert.equal(result.response_format, undefined);
+  assert.equal(result.messages[0].role, "system");
+  assert.match(result.messages[0].content, /strictly follows this JSON schema/);
+  assert.ok(result.messages[0].content.includes('"answer"'));
+  assert.equal(result.messages[1].role, "user");
+  assert.equal(result.messages[1].content, "give me JSON");
+  // Original body is not mutated.
+  assert.equal(body.response_format.type, "json_schema");
+  assert.equal(body.messages.length, 1);
+});
+
+test("DefaultExecutor.transformRequest strips response_format for kilocode json_object requests too", () => {
+  const executor = new DefaultExecutor("kilocode");
+  const body = {
+    model: "deepseek/deepseek-v4-flash",
+    messages: [{ role: "user", content: "give me JSON" }],
+    response_format: { type: "json_object" },
+  };
+
+  const result = executor.transformRequest("deepseek/deepseek-v4-flash", body, true, {
+    providerSpecificData: { baseUrl: "https://api.kilo.ai/v1" },
+  }) as unknown as {
+    response_format?: { type?: string };
+    messages: Array<{ role: string; content: string }>;
+  };
+
+  assert.equal(result.response_format, undefined);
+  assert.equal(result.messages[0].role, "system");
+  assert.match(result.messages[0].content, /valid JSON only/);
+});
+
+test("DefaultExecutor.transformRequest leaves json_schema response_format untouched for native providers", () => {
+  const executor = new DefaultExecutor("openai");
+  const responseFormat = {
+    type: "json_schema",
+    json_schema: { name: "s", schema: { type: "object" } },
+  };
+  const body = {
+    model: "gpt-4.1",
+    messages: [{ role: "user", content: "give me JSON" }],
+    response_format: responseFormat,
+  };
+
+  const result = executor.transformRequest("gpt-4.1", body, true, {}) as any;
+
+  // Native OpenAI keeps the json_schema response_format; no system prompt injected.
+  assert.deepEqual(result.response_format, responseFormat);
+  assert.equal(result.messages.length, 1);
+  assert.equal(result.messages[0].role, "user");
+});
+
+test("DefaultExecutor.transformRequest ignores non-json_schema response_format for openai-compatible providers", () => {
+  const executor = new DefaultExecutor("openai-compatible-deepseek");
+  const body = {
+    model: "deepseek-chat",
+    messages: [{ role: "user", content: "hi" }],
+    response_format: { type: "json_object" },
+  };
+
+  const result = executor.transformRequest("deepseek-chat", body, true, {
+    providerSpecificData: { baseUrl: "https://proxy.example/v1" },
+  }) as any;
+
+  assert.deepEqual(result.response_format, { type: "json_object" });
+  assert.equal(result.messages.length, 1);
+  assert.equal(result.messages[0].role, "user");
 });
 
 test("DefaultExecutor.transformRequest applies GLMT preset defaults without overriding explicit values", () => {
@@ -756,7 +1205,7 @@ test("BaseExecutor helpers manage custom user agents and upstream extra headers"
 
   setUserAgentHeader(headers, "MyAgent/2.0");
   assert.equal(headers["User-Agent"], "MyAgent/2.0");
-  assert.equal(headers["user-agent"], "MyAgent/2.0");
+  assert.equal(headers["user-agent"], undefined);
 
   applyConfiguredUserAgent(headers, { customUserAgent: "MyAgent/3.0" });
   assert.equal(headers["User-Agent"], "MyAgent/3.0");
@@ -768,7 +1217,7 @@ test("BaseExecutor helpers manage custom user agents and upstream extra headers"
   });
   assert.equal(headers.Authorization, "Bearer override");
   assert.equal(headers["User-Agent"], "Merged/4.0");
-  assert.equal(headers["user-agent"], "Merged/4.0");
+  assert.equal(headers["user-agent"], undefined);
   assert.equal(headers["X-Upstream"], "1");
 });
 
@@ -803,10 +1252,63 @@ test("BaseExecutor.needsRefresh returns true only when expiry is near", () => {
   assert.equal(executor.needsRefresh({}), false);
 });
 
-test("DefaultExecutor.refreshCredentials returns null without refresh token", async () => {
+test("DefaultExecutor.refreshCredentials signals nothing to refresh without refresh token", async () => {
   const executor = new DefaultExecutor("gemini");
   const result = await executor.refreshCredentials({}, null);
-  assert.equal(result, null);
+  assert.equal(result, NO_REFRESH_NEEDED);
+});
+
+test("NO_REFRESH_NEEDED is a frozen shared sentinel", () => {
+  assert.equal(Object.isFrozen(NO_REFRESH_NEEDED), true);
+  assert.throws(() => {
+    "use strict";
+    (NO_REFRESH_NEEDED as { error: string }).error = "invalid_grant";
+  }, TypeError);
+  assert.equal(NO_REFRESH_NEEDED.error, "no_refresh_needed");
+});
+
+test("proactive refresh of an API-key connection logs no unrecoverable-sentinel warning", async () => {
+  const originalFetch = globalThis.fetch;
+  const warnings: string[] = [];
+  const sentAuth: string[] = [];
+  globalThis.fetch = async (_url, init = {}) => {
+    sentAuth.push(String(new Headers(init.headers).get("Authorization") ?? ""));
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+  try {
+    const executor = new DefaultExecutor("openai-compatible-test");
+    // Near expiry → needsRefresh() is true, but there is no refresh token.
+    const credentials = {
+      apiKey: "test-key",
+      expiresAt: new Date(Date.now() + 1_000).toISOString(),
+      providerSpecificData: { baseUrl: "https://proxy.example/v1/" },
+    };
+    assert.equal(executor.needsRefresh(credentials), true);
+    await executor.execute({
+      model: "gpt-4.1",
+      body: { model: "gpt-4.1", messages: [{ role: "user", content: "hi" }] },
+      stream: false,
+      credentials,
+      log: {
+        debug: () => {},
+        info: () => {},
+        warn: (_tag: string, msg: string) => warnings.push(String(msg)),
+        error: () => {},
+      },
+    } as unknown as Parameters<DefaultExecutor["execute"]>[0]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.deepEqual(
+    warnings.filter((w) => w.includes("unrecoverable sentinel")),
+    [],
+    "an API-key connection has nothing to refresh — no sentinel warning"
+  );
+  assert.equal(sentAuth.length, 1);
+  assert.equal(sentAuth[0], "Bearer test-key");
 });
 
 test("DefaultExecutor.needsRefresh requests a proactive token for GigaChat", () => {
@@ -864,7 +1366,7 @@ test("DefaultExecutor.refreshCredentials swallows refresh errors and logs them",
 
   try {
     const result = await executor.refreshCredentials(
-      { refreshToken: "refresh-me" },
+      { refreshToken: "refresh-me-unrotated" },
       { error: (tag, message) => messages.push({ tag, message }) }
     );
     assert.equal(result, null);
@@ -1084,10 +1586,12 @@ test("DefaultExecutor.execute does not produce duplicate anthropic-version heade
   const executor = new DefaultExecutor("claude");
   const originalFetch = globalThis.fetch;
   let capturedHeaders: Record<string, string> = {};
+  let capturedBody = "";
 
   globalThis.fetch = async (_url, init = {}) => {
     // Capture raw headers without normalisation so case-variant duplicate keys are visible.
     capturedHeaders = (init.headers as Record<string, string>) || {};
+    capturedBody = String(init.body ?? "");
     return new Response(JSON.stringify({ ok: true }), {
       status: 200,
       headers: { "Content-Type": "application/json" },
@@ -1120,4 +1624,62 @@ test("DefaultExecutor.execute does not produce duplicate anthropic-version heade
   );
   assert.equal(versionKeys.length, 1, "Duplicate anthropic-version header keys found");
   assert.equal(capturedHeaders[versionKeys[0]], "2023-06-01");
+  assert.equal(capturedHeaders["X-Stainless-Runtime-Version"], "v26.3.0");
+  assert.equal(capturedHeaders["X-Stainless-Package-Version"], "0.112.1");
+
+  const sentBody = JSON.parse(capturedBody) as { system?: Array<{ text?: string }> };
+  const cc = `x-anthropic-billing-header: cc_version=${CLAUDE_CODE_CLIENT_BILLING_VERSION}; `;
+  const billing = sentBody.system?.[0]?.text ?? "";
+  assert.equal(billing.slice(0, cc.length), cc, "cc_version tracks the constant (#14627)");
+  assert.match(billing.slice(cc.length), /^cc_entrypoint=cli; cch=[0-9a-f]{5};$/);
+});
+
+test('shouldForceResponsesUpstream respects explicit apiType="chat" even when namespace tools are present', () => {
+  const body = {
+    input: "hi",
+    tools: [
+      {
+        type: "namespace",
+        name: "collaboration",
+        tools: [
+          {
+            name: "spawn_agent",
+            description: "Spawn an agent",
+            parameters: { type: "object", properties: { task: { type: "string" } } },
+          },
+        ],
+      },
+    ],
+  };
+  const credentials = {
+    providerSpecificData: {
+      baseUrl: "https://ark.cn-beijing.volces.com/api/coding/v3",
+      apiType: "chat",
+    },
+  };
+  assert.equal(
+    shouldForceResponsesUpstream("openai-compatible-responses-demo", body, credentials),
+    false
+  );
+});
+
+test("shouldForceResponsesUpstream still forces /responses for untyped OpenAI-compatible providers with namespace tools", () => {
+  const body = {
+    input: "hi",
+    tools: [
+      {
+        type: "namespace",
+        name: "collaboration",
+        tools: [
+          { name: "spawn_agent", description: "Spawn an agent", parameters: { type: "object" } },
+        ],
+      },
+    ],
+  };
+  const credentials = {
+    providerSpecificData: {
+      baseUrl: "https://proxy.example/v1",
+    },
+  };
+  assert.equal(shouldForceResponsesUpstream("openai-compatible-test", body, credentials), true);
 });

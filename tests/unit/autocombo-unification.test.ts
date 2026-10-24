@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 const intelligentRouting = await import("../../src/lib/combos/intelligentRouting.ts");
+const { getModePack } = await import("../../open-sse/services/autoCombo/modePacks.ts");
 
 test("getStrategyCategory classifies intelligent and deterministic strategies correctly", () => {
   assert.equal(intelligentRouting.getStrategyCategory("auto"), "intelligent");
@@ -136,17 +137,36 @@ test("intelligent combo selection defaults only inside the intelligent filter", 
 
 test("sidebar visibility excludes the removed auto-combo item", async () => {
   const sidebarVisibility = await import("../../src/shared/constants/sidebarVisibility.ts");
-  const primarySection = sidebarVisibility.SIDEBAR_SECTIONS.find(
-    (section) => section.id === "primary"
+  const omniProxySection = sidebarVisibility.SIDEBAR_SECTIONS.find(
+    (section) => section.id === "omni-proxy"
   );
 
-  assert.equal(sidebarVisibility.HIDEABLE_SIDEBAR_ITEM_IDS.includes("auto-combo"), false);
-  assert.ok(primarySection);
   assert.equal(
-    primarySection.items.some((item) => item.id === "auto-combo"),
+    (sidebarVisibility.HIDEABLE_SIDEBAR_ITEM_IDS as readonly string[]).includes("auto-combo"),
     false
   );
-  assert.deepEqual(sidebarVisibility.normalizeHiddenSidebarItems(["auto-combo", "home"]), ["home"]);
+  assert.ok(omniProxySection);
+  const items = sidebarVisibility.getSectionItems(omniProxySection);
+  assert.equal(
+    items.some((item) => (item.id as string) === "auto-combo"),
+    false
+  );
+  assert.deepEqual(sidebarVisibility.normalizeHiddenSidebarItems(["auto-combo" as any, "home"]), [
+    "home",
+  ]);
+});
+
+test("custom mode-pack selection preserves explicit slider intent", () => {
+  assert.deepEqual(intelligentRouting.MODE_PACK_OPTIONS[0], {
+    id: "custom",
+    label: "Custom / None (Use Sliders)",
+    emoji: "tune",
+  });
+  assert.equal(
+    intelligentRouting.normalizeIntelligentRoutingConfig({ modePack: "custom" }).modePack,
+    "custom"
+  );
+  assert.equal(getModePack("custom"), undefined);
 });
 
 test("intelligent routing helpers normalize config and build provider scores", () => {

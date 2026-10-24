@@ -1,6 +1,7 @@
 "use client";
 
 import { useId } from "react";
+import { useTranslations } from "next-intl";
 import { cn } from "@/shared/utils/cn";
 
 interface SelectOption {
@@ -15,6 +16,10 @@ interface SelectProps extends Omit<React.SelectHTMLAttributes<HTMLSelectElement>
   error?: React.ReactNode;
   hint?: React.ReactNode;
   selectClassName?: string;
+  /** Keep the placeholder selectable after a real value is chosen. */
+  placeholderDisabled?: boolean;
+  /** Label and select on one line, with a shorter select (settings rows, cards). */
+  compact?: boolean;
 }
 
 export default function Select({
@@ -22,16 +27,20 @@ export default function Select({
   options = [],
   value,
   onChange,
-  placeholder = "Select an option",
+  placeholder,
   error,
   hint,
   disabled = false,
   required = false,
   className,
   selectClassName,
+  placeholderDisabled = true,
+  compact = false,
   id: externalId,
+  children,
   ...props
 }: SelectProps) {
+  const t = useTranslations("common");
   const generatedId = useId();
   const selectId = externalId || generatedId;
   const errorId = error ? `${selectId}-error` : undefined;
@@ -39,9 +48,19 @@ export default function Select({
   const describedBy = [errorId, hintId].filter(Boolean).join(" ") || undefined;
 
   return (
-    <div className={cn("flex flex-col gap-1.5", className)}>
+    <div
+      className={cn(
+        compact
+          ? "flex flex-wrap items-center justify-between gap-x-3 gap-y-1"
+          : "flex flex-col gap-1.5",
+        className
+      )}
+    >
       {label && (
-        <label htmlFor={selectId} className="text-sm font-medium text-text-main">
+        <label
+          htmlFor={selectId}
+          className={cn("font-medium text-text-main", compact ? "text-xs" : "text-sm")}
+        >
           {label}
           {required && (
             <span className="text-red-500 ml-1" aria-hidden="true">
@@ -50,7 +69,7 @@ export default function Select({
           )}
         </label>
       )}
-      <div className="relative">
+      <div className={cn("relative", compact && "min-w-0 flex-1 sm:flex-none")}>
         <select
           id={selectId}
           value={value}
@@ -61,9 +80,11 @@ export default function Select({
           aria-invalid={error ? true : undefined}
           aria-describedby={describedBy}
           className={cn(
-            "w-full py-2 px-3 pr-10 text-sm text-text-main",
-            "bg-surface border border-black/10 dark:border-white/10 rounded-md appearance-none",
-            "focus:ring-1 focus:ring-primary/30 focus:border-primary/50 focus:outline-none",
+            compact
+              ? "w-full py-1.5 ps-2.5 pe-8 text-sm text-text-main"
+              : "w-full py-2 px-3 pe-10 text-sm text-text-main",
+            "bg-surface border border-black/10 dark:border-white/10 rounded-control appearance-none",
+            "focus:ring-1 focus:ring-accent/30 focus:border-accent/50 focus:outline-none",
             "transition-all disabled:opacity-50 disabled:cursor-not-allowed",
             "text-[16px] sm:text-sm",
             error ? "border-red-500 focus:border-red-500 focus:ring-red-500/20" : "",
@@ -71,17 +92,21 @@ export default function Select({
           )}
           {...props}
         >
-          <option value="" disabled className="bg-surface text-text-muted">
-            {placeholder}
-          </option>
-          {options.map((option) => (
-            <option key={option.value} value={option.value} className="bg-surface text-text-main">
-              {option.label}
+          {!children && (placeholder ?? t("selectOption")) && (
+            <option value="" disabled={placeholderDisabled} className="bg-surface text-text-muted">
+              {placeholder ?? t("selectOption")}
             </option>
-          ))}
+          )}
+          {!children &&
+            options.map((option) => (
+              <option key={option.value} value={option.value} className="bg-surface text-text-main">
+                {option.label}
+              </option>
+            ))}
+          {children}
         </select>
         <div
-          className="absolute inset-y-0 right-0 flex items-center pr-3 pointer-events-none text-text-muted"
+          className="absolute inset-y-0 end-0 flex items-center pe-3 pointer-events-none text-text-muted"
           aria-hidden="true"
         >
           <span className="material-symbols-outlined text-[20px]">expand_more</span>
