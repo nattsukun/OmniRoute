@@ -1,0 +1,12 @@
+# Official stable OmniRoute 3.8.52, pinned so rollback is reproducible.
+# Source application matches v3.8.52; later main commits only touch CI/Electron.
+FROM ghcr.io/diegosouzapw/omniroute:3.8.52@sha256:b08a12e876baa8a5ccadd1ebbe346fe7267dba3b1c9f4fd6bb02070fae41ab6c
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends gosu && rm -rf /var/lib/apt/lists/*
+COPY scripts/ops/railway-entrypoint.sh /app/railway-entrypoint.sh
+RUN chmod 755 /app/railway-entrypoint.sh
+ENV DATA_DIR=/app/data
+ENV PORT=20128
+ENV HOSTNAME=::
+ENTRYPOINT ["/app/railway-entrypoint.sh"]
+CMD ["node", "dev/run-standalone.mjs"]
