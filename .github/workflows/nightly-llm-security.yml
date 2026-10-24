@@ -69,7 +69,10 @@ jobs:
           echo "::error::Test server did not come up on 21778 in 120s — see server.log. Refusing to run the guard eval against an unknown target."
           tail -40 server.log || true
           exit 1
-      # Pinned, network-isolated promptfoo. Two constraints, both verified on this box:
+      # 0.125.0 removes the vulnerable node-forge dependency. promptfooconfig now
+      # serializes application errors as output; check-promptfoo-block-response.mjs
+      # verifies both 400 SECURITY_001 cases without the classifier regression below.
+      # Historical constraints explaining the exact pin and isolated working directory:
       # (1) never `promptfoo@latest`: promptfoo >= 0.123.1 (promptfoo/promptfoo#10866) throws
       #     `result?.error?.includes is not a function` inside its rate-limit classifier when
       #     the https provider hands it the parsed 4xx JSON body the guard answers in block
@@ -88,7 +91,7 @@ jobs:
       # no local install to shadow the npx cache tree.
       - name: promptfoo guard-validation
         working-directory: ${{ runner.temp }}
-        run: npx --yes promptfoo@0.123.0 eval -c "$GITHUB_WORKSPACE/promptfooconfig.yaml" --no-cache
+        run: npx --yes promptfoo@0.125.0 eval -c "$GITHUB_WORKSPACE/promptfooconfig.yaml" --no-cache
         env:
           OMNIROUTE_URL: http://localhost:21778
           OMNIROUTE_API_KEY: not-needed-blocked-before-upstream

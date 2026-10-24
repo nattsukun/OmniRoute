@@ -12,7 +12,8 @@ providers:
         messages:
           - role: user
             content: "{{prompt}}"
-      transformResponse: "json"
+      # Keep the application error in the evaluated output, not Promptfoo's error envelope.
+      transformResponse: "JSON.stringify(json)"
 defaultTest:
   options:
     provider: https
